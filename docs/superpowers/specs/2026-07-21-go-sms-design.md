@@ -90,13 +90,13 @@ type Submission struct {
 
 默认客户端遵循 Go 的标准代理环境约定。这属于 HTTP 传输策略，不是 Provider 凭证或业务配置；需要完全确定性或不同代理策略的宿主应用可以注入自己的 `http.Client`。
 
-Provider 构造失败用于固定配置错误；发送级输入错误通过 `Send` 返回 `InvalidRequest`。
+Provider 构造失败用于固定配置错误；发送级输入错误通过 `Send` 返回普通错误。
 
 ## 发送流程
 
-1. 检查 Context、Recipient、模板 ID、参数名称和重复项。nil Context 返回 `InvalidRequest`；已取消或已超时的 Context 直接返回 `ctx.Err()`，且不创建外部请求。
+1. 检查 Context、Recipient、模板 ID、参数名称和重复项。nil Context 返回普通错误；已取消或已超时的 Context 直接返回 `ctx.Err()`，且不创建外部请求。
 2. 用发送级 `SignatureRef` 覆盖 Provider 默认值，并校验该 Provider 的签名要求。
-3. 把 E.164 Recipient 转换为目标 API 要求的格式。不支持该国家或地区时返回 `InvalidRequest`，不切换发送 API 或 Provider。
+3. 把 E.164 Recipient 转换为目标 API 要求的格式。不支持该国家或地区时返回普通 preflight 错误，不切换发送 API 或 Provider。
 4. 将参数按目标 API 编码。位置型 API 只读取切片顺序，命名型 API 按名称生成对象或表单值。
 5. 使用能接受 `context.Context` 且已关闭重试的官方 SDK 方法，或执行一次直接 HTTP 请求。
 6. 只有 Provider 明确返回受理状态时才构造 `Submission`；HTTP 200 中的业务拒绝仍转换为 `failure.Failure`。
@@ -113,7 +113,7 @@ Provider 构造失败用于固定配置错误；发送级输入错误通过 `Sen
 | 七牛云 | 直接 HTTP | 号码按七牛 API 要求转换；`SignatureRef` 进入 `signature_id` | 按名称构造 `parameters` | `job_id` 为 MessageID，HTTP 请求标识为 RequestID |
 | 云片 | 直接 HTTP `tpl_single_send` | E.164 按云片规则进入 `mobile`；SignatureRef 不参与模板发送 | 名称和值进行表单编码后构造 `tpl_value` | 响应 `sid` 为 MessageID，其余稳定标量可进入 Metadata |
 
-阿里云首版的 `SendSms` 映射只支持中国大陆 `+86` Recipient；其他国家或地区返回 `InvalidRequest`。其余 Provider 的国家与地区支持范围以所用发送端点为准，并通过契约测试固定转换行为。
+阿里云首版的 `SendSms` 映射只支持中国大陆 `+86` Recipient；其他国家或地区返回普通 preflight 错误。其余 Provider 的国家与地区支持范围以所用发送端点为准，并通过契约测试固定转换行为。
 
 腾讯和新版阿里官方 SDK 提供 Context 发送方法，并允许禁用重试。UCloud 官方 SDK 的发送请求默认启用重试且发送方法不接收 Context；七牛和云片当前官方 SDK 的发送方法也不接收 Context。因此后三家直接调用 HTTP API，以满足可取消且只尝试一次的公共契约。直接 HTTP 实现可参考官方 SDK 的鉴权算法，但不复制其公共类型。
 
@@ -140,6 +140,7 @@ type Failure interface {
     Category() Category
     Details() Details
     UnknownOutcome() bool
+    isFailure()
 }
 
 func From(error) (Failure, bool)
