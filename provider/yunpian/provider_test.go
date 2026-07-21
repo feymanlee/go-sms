@@ -212,6 +212,19 @@ func TestSendClassifiesYunpianRejectionsWithoutExposingRemoteText(t *testing.T) 
 	}
 }
 
+func TestSendOmitsInvalidNegativeYunpianCode(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"code":-42}`)
+	}))
+	defer server.Close()
+
+	_, err := testProvider(t, server.Client(), server.URL).Send(context.Background(), testRequest(t))
+	got := requireFailure(t, err, failure.Rejected)
+	if details := got.Details(); details.Code != "" {
+		t.Fatalf("details = %#v", details)
+	}
+}
+
 func TestSendReturnsUnknownOutcomeForMalformedOrIncompleteJSON(t *testing.T) {
 	tests := []struct {
 		name string

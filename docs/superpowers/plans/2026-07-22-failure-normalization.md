@@ -412,7 +412,7 @@ git commit -m "refactor(qiniu): normalize Send Failures"
 
 - [ ] **Step 1: Write failing Yunpian Failure-interface tests**
 
-Add the exact `requireFailure` helper from Task 2. HTTP 401/403, 429, other 4xx, and 5xx must assert the matrix category and decimal status Code. Every nonzero body Code must assert Rejected and preserve that Code. Nil response, decode failure, trailing JSON, missing Code, and missing SID must assert UnknownOutcome. Empty parameter values, pre-canceled Context, and request-construction failures must assert `failure.From(err)` is false. The transport test must assert `!errors.Is(err, transportErr)` while cancellation and deadline rows still match their Context sentinel.
+Add the exact `requireFailure` helper from Task 2. HTTP 401/403, 429, other 4xx, and 5xx must assert the matrix category and decimal status Code. Every nonzero body Code must assert Rejected; valid body Codes are preserved, while invalid negative Codes are omitted by shared diagnostic validation. Nil response, decode failure, trailing JSON, missing Code, and missing SID must assert UnknownOutcome. Empty parameter values, pre-canceled Context, and request-construction failures must assert `failure.From(err)` is false. The transport test must assert `!errors.Is(err, transportErr)` while cancellation and deadline rows still match their Context sentinel.
 
 - [ ] **Step 2: Run Yunpian tests and verify RED**
 
