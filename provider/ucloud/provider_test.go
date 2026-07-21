@@ -204,6 +204,8 @@ func TestSendRejectsMalformedSuccessfulResponses(t *testing.T) {
 		body string
 	}{
 		{name: "invalid JSON", body: "not JSON for +8613812345678"},
+		{name: "missing RetCode", body: `{"SessionNo":"session-1"}`},
+		{name: "null RetCode", body: `{"RetCode":null,"SessionNo":"session-1"}`},
 		{name: "missing session", body: `{"RetCode":0}`},
 	}
 	for _, tt := range tests {

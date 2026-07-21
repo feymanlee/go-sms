@@ -125,15 +125,18 @@ func (p *Provider) Send(ctx context.Context, req sms.Request) (sms.Submission, e
 	}
 
 	var body struct {
-		RetCode   int    `json:"RetCode"`
+		RetCode   *int   `json:"RetCode"`
 		Message   string `json:"Message"`
 		SessionNo string `json:"SessionNo"`
 	}
 	if err := decodeResponse(response.Body, &body); err != nil {
 		return sms.Submission{}, internalError("cannot decode response", err)
 	}
-	if body.RetCode != 0 {
-		return sms.Submission{}, providerRejection(body.RetCode)
+	if body.RetCode == nil {
+		return sms.Submission{}, internalError("malformed response", nil)
+	}
+	if *body.RetCode != 0 {
+		return sms.Submission{}, providerRejection(*body.RetCode)
 	}
 	if body.SessionNo == "" {
 		return sms.Submission{}, internalError("malformed response", nil)
