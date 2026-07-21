@@ -1,8 +1,9 @@
 package sms
 
 import (
-	"errors"
 	"testing"
+
+	"github.com/feymanlee/go-sms/failure"
 )
 
 func validRequest(t *testing.T) Request {
@@ -21,19 +22,26 @@ func TestRequestValidate(t *testing.T) {
 	tests := []struct {
 		name   string
 		mutate func(*Request)
+		want   string
 	}{
-		{"zero recipient", func(r *Request) { r.Recipient = Recipient{} }},
-		{"blank template", func(r *Request) { r.Message.TemplateID = " " }},
-		{"blank parameter name", func(r *Request) { r.Message.Params[0].Name = " " }},
-		{"duplicate parameter", func(r *Request) { r.Message.Params = append(r.Message.Params, TemplateParam{Name: "code"}) }},
+		{"zero recipient", func(r *Request) { r.Recipient = Recipient{} }, "sms: recipient must be E.164"},
+		{"blank template", func(r *Request) { r.Message.TemplateID = " " }, "sms: template ID is required"},
+		{"blank parameter name", func(r *Request) { r.Message.Params[0].Name = " " }, "sms: template parameter name is required"},
+		{"duplicate parameter", func(r *Request) { r.Message.Params = append(r.Message.Params, TemplateParam{Name: "code"}) }, "sms: template parameter names must be unique"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			req := validRequest(t)
 			tt.mutate(&req)
 			err := req.Validate()
-			if !errors.Is(err, ErrInvalidRequest) {
-				t.Fatalf("error = %v", err)
+			if err == nil {
+				t.Fatal("Validate succeeded")
+			}
+			if _, ok := failure.From(err); ok {
+				t.Fatalf("validation returned Failure: %v", err)
+			}
+			if got := err.Error(); got != tt.want {
+				t.Fatalf("error = %q, want %q", got, tt.want)
 			}
 		})
 	}

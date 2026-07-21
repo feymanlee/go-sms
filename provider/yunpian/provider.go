@@ -56,7 +56,7 @@ func New(config Config, opts ...Option) (*Provider, error) {
 }
 
 func (p *Provider) Send(ctx context.Context, req sms.Request) (sms.Submission, error) {
-	if _, err := providerutil.Prepare(ctx, "yunpian", req, "", false); err != nil {
+	if _, err := providerutil.Prepare(ctx, req, "", false); err != nil {
 		return sms.Submission{}, err
 	}
 	for _, param := range req.Message.Params {

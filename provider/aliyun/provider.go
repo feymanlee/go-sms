@@ -96,18 +96,13 @@ func New(config Config, opts ...Option) (*Provider, error) {
 }
 
 func (p *Provider) Send(ctx context.Context, req sms.Request) (sms.Submission, error) {
-	signature, err := providerutil.Prepare(ctx, "aliyun", req, p.defaultSignature, true)
+	signature, err := providerutil.Prepare(ctx, req, p.defaultSignature, true)
 	if err != nil {
 		return sms.Submission{}, err
 	}
 	phoneNumber, err := providerutil.ChinaNational(req.Recipient.String())
 	if err != nil {
-		return sms.Submission{}, &sms.SendError{
-			Kind:     sms.KindInvalidRequest,
-			Provider: "aliyun",
-			Message:  providerutil.Sanitize(err.Error(), req.Recipient),
-			Cause:    err,
-		}
+		return sms.Submission{}, errors.New("aliyun: only supports +86 recipients")
 	}
 
 	params := make(map[string]string, len(req.Message.Params))

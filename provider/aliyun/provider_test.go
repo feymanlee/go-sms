@@ -146,7 +146,10 @@ func TestSendRejectsNonChinaRecipientBeforeCallingClient(t *testing.T) {
 	req.Recipient = recipient
 
 	_, err = testProvider(t, fake).Send(context.Background(), req)
-	if !errors.Is(err, sms.ErrInvalidRequest) || fake.calls != 0 {
+	if err == nil {
+		t.Fatal("Send succeeded")
+	}
+	if _, ok := failure.From(err); ok || fake.calls != 0 {
 		t.Fatalf("error = %v, calls = %d", err, fake.calls)
 	}
 }
@@ -483,6 +486,8 @@ func TestNewValidatesConfig(t *testing.T) {
 			tt.mutate(&config)
 			if _, err := New(config); err == nil {
 				t.Fatal("New returned nil error")
+			} else if _, ok := failure.From(err); ok {
+				t.Fatalf("constructor validation returned Failure: %v", err)
 			}
 		})
 	}

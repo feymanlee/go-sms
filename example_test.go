@@ -2,11 +2,11 @@ package sms_test
 
 import (
 	"context"
-	"errors"
 	"log"
 	"time"
 
 	sms "github.com/feymanlee/go-sms"
+	"github.com/feymanlee/go-sms/failure"
 	"github.com/feymanlee/go-sms/provider/tencent"
 )
 
@@ -38,12 +38,15 @@ func ExampleSender() {
 			},
 		},
 	})
-	if errors.Is(err, sms.ErrUnknownOutcome) {
-		log.Print("send outcome is unknown")
-		return
-	}
 	if err != nil {
-		log.Print(err)
+		if got, ok := failure.From(err); ok {
+			details := got.Details()
+			log.Printf("SMS Send Attempt failed: category=%s provider=%s code=%s request_id=%s",
+				got.Category(), details.Provider, details.Code, details.RequestID)
+			if got.UnknownOutcome() {
+				log.Print("reconcile before retry")
+			}
+		}
 		return
 	}
 	log.Printf("accepted by %s as %s", submission.Provider, submission.MessageID)

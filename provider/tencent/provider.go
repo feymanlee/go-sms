@@ -102,7 +102,7 @@ func requestTimeout(client *http.Client) int {
 }
 
 func (p *Provider) Send(ctx context.Context, req sms.Request) (sms.Submission, error) {
-	signature, err := providerutil.Prepare(ctx, "tencent", req, p.defaultSignature, true)
+	signature, err := providerutil.Prepare(ctx, req, p.defaultSignature, true)
 	if err != nil {
 		return sms.Submission{}, err
 	}

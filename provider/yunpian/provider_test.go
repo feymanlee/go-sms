@@ -330,6 +330,8 @@ func TestSendReturnsOrdinaryErrorWhenRequestCannotBeCreated(t *testing.T) {
 func TestNewValidatesAPIKey(t *testing.T) {
 	if _, err := New(Config{}); err == nil {
 		t.Fatal("New returned nil error")
+	} else if _, ok := failure.From(err); ok {
+		t.Fatalf("constructor validation returned Failure: %v", err)
 	}
 }
 

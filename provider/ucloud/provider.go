@@ -75,18 +75,13 @@ func New(config Config, opts ...Option) (*Provider, error) {
 }
 
 func (p *Provider) Send(ctx context.Context, req sms.Request) (sms.Submission, error) {
-	signatureRef, err := providerutil.Prepare(ctx, "ucloud", req, p.defaultSignature, false)
+	signatureRef, err := providerutil.Prepare(ctx, req, p.defaultSignature, false)
 	if err != nil {
 		return sms.Submission{}, err
 	}
 	phoneNumber, err := providerutil.UCloudNumber(req.Recipient.String())
 	if err != nil {
-		return sms.Submission{}, &sms.SendError{
-			Kind:     sms.KindInvalidRequest,
-			Provider: "ucloud",
-			Message:  providerutil.Sanitize(err.Error(), req.Recipient),
-			Cause:    err,
-		}
+		return sms.Submission{}, errors.New("ucloud: cannot convert recipient")
 	}
 
 	values := map[string]string{

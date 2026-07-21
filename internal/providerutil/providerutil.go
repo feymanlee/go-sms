@@ -14,9 +14,9 @@ import (
 )
 
 // Prepare validates a request and resolves its effective signature before send work starts.
-func Prepare(ctx context.Context, provider string, req sms.Request, defaultSignature string, signatureRequired bool) (string, error) {
+func Prepare(ctx context.Context, req sms.Request, defaultSignature string, signatureRequired bool) (string, error) {
 	if ctx == nil {
-		return "", &sms.SendError{Kind: sms.KindInvalidRequest, Provider: provider, Message: "context is required"}
+		return "", errors.New("sms: context is required")
 	}
 	select {
 	case <-ctx.Done():
@@ -24,7 +24,7 @@ func Prepare(ctx context.Context, provider string, req sms.Request, defaultSigna
 	default:
 	}
 	if err := req.Validate(); err != nil {
-		return "", &sms.SendError{Kind: sms.KindInvalidRequest, Provider: provider, Message: err.Error(), Cause: err}
+		return "", err
 	}
 
 	signature := req.SignatureRef
@@ -32,58 +32,9 @@ func Prepare(ctx context.Context, provider string, req sms.Request, defaultSigna
 		signature = defaultSignature
 	}
 	if signatureRequired && signature == "" {
-		return "", &sms.SendError{Kind: sms.KindInvalidRequest, Provider: provider, Message: "SignatureRef is required"}
+		return "", errors.New("sms: SignatureRef is required")
 	}
 	return signature, nil
-}
-
-const unknownOutcomeMessage = "provider request outcome is unknown"
-
-// UnknownOutcome wraps an indeterminate provider failure without exposing cause text.
-func UnknownOutcome(provider string, recipient sms.Recipient, cause error) error {
-	return unknownOutcome(provider, "", "", cause)
-}
-
-// UnknownOutcomeWithDetails wraps an indeterminate provider failure with safe provider metadata.
-func UnknownOutcomeWithDetails(provider, code, requestID string, cause error) error {
-	return unknownOutcome(provider, code, requestID, cause)
-}
-
-func unknownOutcome(provider, code, requestID string, cause error) error {
-	return &sms.SendError{
-		Kind:      sms.KindUnknownOutcome,
-		Provider:  provider,
-		Code:      code,
-		Message:   unknownOutcomeMessage,
-		RequestID: requestID,
-		Cause:     OpaqueCause(cause),
-	}
-}
-
-// OpaqueCause preserves errors.Is behavior without exposing the original error chain.
-func OpaqueCause(cause error) error {
-	if cause == nil {
-		return nil
-	}
-	return opaqueCause{cause: cause}
-}
-
-type opaqueCause struct {
-	cause error
-}
-
-func (e opaqueCause) Error() string { return unknownOutcomeMessage }
-
-func (e opaqueCause) Is(target error) bool { return errors.Is(e.cause, target) }
-
-// Sanitize replaces the recipient's E.164 and national forms in a message.
-func Sanitize(message string, recipient sms.Recipient) string {
-	value := recipient.String()
-	message = strings.ReplaceAll(message, value, "[recipient]")
-	if _, national, err := SplitE164(value); err == nil {
-		message = strings.ReplaceAll(message, national, "[recipient]")
-	}
-	return message
 }
 
 // SplitE164 splits an E.164 number into country calling code and national number.

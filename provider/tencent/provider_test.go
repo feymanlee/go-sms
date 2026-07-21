@@ -477,8 +477,25 @@ func TestSendValidatesBeforeCallingClient(t *testing.T) {
 	req.SignatureRef = ""
 
 	_, err := provider.Send(context.Background(), req)
-	if !errors.Is(err, sms.ErrInvalidRequest) || fake.calls != 0 {
+	if err == nil {
+		t.Fatal("Send succeeded")
+	}
+	if _, ok := failure.From(err); ok || fake.calls != 0 {
 		t.Fatalf("error = %v, calls = %d", err, fake.calls)
+	}
+}
+
+func TestSendRejectsCanceledContextWithoutCallingClient(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	fake := &fakeClient{}
+
+	_, err := newTestProvider(t, fake).Send(ctx, testRequest(t))
+	if !errors.Is(err, context.Canceled) || fake.calls != 0 {
+		t.Fatalf("error = %v, calls = %d", err, fake.calls)
+	}
+	if _, ok := failure.From(err); ok {
+		t.Fatalf("done Context returned Failure: %v", err)
 	}
 }
 
@@ -499,6 +516,8 @@ func TestNewValidatesConfig(t *testing.T) {
 			tt.mutate(&config)
 			if _, err := New(config); err == nil {
 				t.Fatal("New returned nil error")
+			} else if _, ok := failure.From(err); ok {
+				t.Fatalf("constructor validation returned Failure: %v", err)
 			}
 		})
 	}
@@ -518,6 +537,9 @@ func TestNewRejectsTencentGlobalHTTPClientWithoutMutation(t *testing.T) {
 	)
 	if err == nil || !strings.Contains(err.Error(), "DefaultHttpClient") || !strings.Contains(err.Error(), "WithHTTPClient") {
 		t.Errorf("error = %v", err)
+	}
+	if _, ok := failure.From(err); ok {
+		t.Fatalf("constructor validation returned Failure: %v", err)
 	}
 	if tccommon.DefaultHttpClient != globalClient {
 		t.Error("Tencent global client pointer changed")

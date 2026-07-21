@@ -363,6 +363,23 @@ func TestSendRejectsCanceledContextWithoutAttempt(t *testing.T) {
 	if !errors.Is(err, context.Canceled) || calls.Load() != 0 {
 		t.Fatalf("error = %v, calls = %d", err, calls.Load())
 	}
+	if _, ok := failure.From(err); ok {
+		t.Fatalf("done Context returned Failure: %v", err)
+	}
+}
+
+func TestSendReturnsOrdinaryErrorWhenRequestCannotBeCreated(t *testing.T) {
+	provider, err := New(testConfig(), WithEndpoint("://invalid"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = provider.Send(context.Background(), testRequest(t))
+	if err == nil {
+		t.Fatal("Send returned nil error")
+	}
+	if _, ok := failure.From(err); ok {
+		t.Fatalf("request construction returned Failure: %v", err)
+	}
 }
 
 func TestNewValidatesRequiredConfig(t *testing.T) {
@@ -382,6 +399,8 @@ func TestNewValidatesRequiredConfig(t *testing.T) {
 			tt.mutate(&config)
 			if _, err := New(config); err == nil {
 				t.Fatal("New returned nil error")
+			} else if _, ok := failure.From(err); ok {
+				t.Fatalf("constructor validation returned Failure: %v", err)
 			}
 		})
 	}

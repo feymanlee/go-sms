@@ -1,6 +1,9 @@
 package sms
 
-import "strings"
+import (
+	"errors"
+	"strings"
+)
 
 func (r Request) Validate() error {
 	if !r.Recipient.valid() {
@@ -23,5 +26,5 @@ func (r Request) Validate() error {
 }
 
 func invalidRequest(message string) error {
-	return &SendError{Kind: KindInvalidRequest, Message: message}
+	return errors.New("sms: " + message)
 }

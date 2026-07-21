@@ -68,18 +68,13 @@ func New(config Config, opts ...Option) (*Provider, error) {
 }
 
 func (p *Provider) Send(ctx context.Context, req sms.Request) (sms.Submission, error) {
-	signatureRef, err := providerutil.Prepare(ctx, "qiniu", req, p.defaultSignature, true)
+	signatureRef, err := providerutil.Prepare(ctx, req, p.defaultSignature, true)
 	if err != nil {
 		return sms.Submission{}, err
 	}
 	mobile, err := providerutil.ChinaNational(req.Recipient.String())
 	if err != nil {
-		return sms.Submission{}, &sms.SendError{
-			Kind:     sms.KindInvalidRequest,
-			Provider: "qiniu",
-			Message:  providerutil.Sanitize(err.Error(), req.Recipient),
-			Cause:    err,
-		}
+		return sms.Submission{}, errors.New("qiniu: only supports +86 recipients")
 	}
 
 	body := struct {
