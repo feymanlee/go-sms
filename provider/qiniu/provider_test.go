@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -135,10 +136,36 @@ func TestSendClassifiesHTTPResponsesAndCapturesRequestID(t *testing.T) {
 
 			_, err := testProvider(t, server.Client(), server.URL).Send(context.Background(), testRequest(t))
 			var detail *sms.SendError
-			if !errors.Is(err, tt.want) || !errors.As(err, &detail) || detail.RequestID != "request-error" || detail.Message != "failed for [recipient] and [recipient]" {
+			if !errors.Is(err, tt.want) || !errors.As(err, &detail) || detail.Code != strconv.Itoa(tt.status) || detail.RequestID != "request-error" || detail.Message != non2xxMessage {
 				t.Fatalf("error = %v, detail = %#v", err, detail)
 			}
 		})
+	}
+}
+
+func TestSendDoesNotExposeRemoteErrorBody(t *testing.T) {
+	const remoteError = `request for +8613812345678 and +12025550123 failed: Authorization: Bearer qiniu-secret-token; body={"signature_id":"sig-private","template_id":"template-private","mobiles":["13812345678"]}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Reqid", "request-error")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":`+strconv.Quote(remoteError)+`}`)
+	}))
+	defer server.Close()
+
+	_, err := testProvider(t, server.Client(), server.URL).Send(context.Background(), testRequest(t))
+	var detail *sms.SendError
+	if !errors.Is(err, sms.ErrRejected) || !errors.As(err, &detail) || detail.Code != strconv.Itoa(http.StatusBadRequest) || detail.RequestID != "request-error" || detail.Message != non2xxMessage {
+		t.Fatalf("error = %v, detail = %#v", err, detail)
+	}
+	for _, secret := range []string{
+		"+8613812345678",
+		"+12025550123",
+		"Authorization: Bearer qiniu-secret-token",
+		`{"signature_id":"sig-private","template_id":"template-private","mobiles":["13812345678"]}`,
+	} {
+		if strings.Contains(err.Error(), secret) || strings.Contains(detail.Message, secret) {
+			t.Fatalf("remote error leaked %q: error=%q message=%q", secret, err.Error(), detail.Message)
+		}
 	}
 }
 

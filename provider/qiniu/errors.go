@@ -2,10 +2,12 @@ package qiniu
 
 import (
 	"net/http"
+	"strconv"
 
 	sms "github.com/feymanlee/go-sms"
-	"github.com/feymanlee/go-sms/internal/providerutil"
 )
+
+const non2xxMessage = "qiniu request failed"
 
 func httpErrorKind(status int) sms.ErrorKind {
 	switch {
@@ -20,11 +22,12 @@ func httpErrorKind(status int) sms.ErrorKind {
 	}
 }
 
-func providerError(status int, message, requestID string, recipient sms.Recipient) error {
+func providerError(status int, requestID string) error {
 	return &sms.SendError{
 		Kind:      httpErrorKind(status),
 		Provider:  "qiniu",
-		Message:   providerutil.Sanitize(message, recipient),
+		Code:      strconv.Itoa(status),
+		Message:   non2xxMessage,
 		RequestID: requestID,
 	}
 }

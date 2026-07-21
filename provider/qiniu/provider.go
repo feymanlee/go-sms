@@ -115,13 +115,7 @@ func (p *Provider) Send(ctx context.Context, req sms.Request) (sms.Submission, e
 
 	requestID := response.Header.Get("X-Reqid")
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		var responseBody struct {
-			Error string `json:"error"`
-		}
-		if err := json.NewDecoder(response.Body).Decode(&responseBody); err != nil {
-			return sms.Submission{}, providerError(response.StatusCode, "", requestID, req.Recipient)
-		}
-		return sms.Submission{}, providerError(response.StatusCode, responseBody.Error, requestID, req.Recipient)
+		return sms.Submission{}, providerError(response.StatusCode, requestID)
 	}
 
 	var responseBody struct {
