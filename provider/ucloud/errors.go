@@ -1,41 +1,18 @@
 package ucloud
 
 import (
-	"strconv"
-
-	sms "github.com/feymanlee/go-sms"
-	"github.com/feymanlee/go-sms/internal/providerutil"
+	"github.com/feymanlee/go-sms/failure"
 )
 
-const providerErrorMessage = "ucloud provider request failed"
-
-func httpErrorKind(status int) sms.ErrorKind {
+func httpErrorCategory(status int) failure.Category {
 	switch {
 	case status == 401 || status == 403:
-		return sms.KindAuthentication
+		return failure.Authentication
 	case status == 429:
-		return sms.KindRateLimited
+		return failure.RateLimited
 	case status >= 500 && status <= 599:
-		return sms.KindUnavailable
+		return failure.Unavailable
 	default:
-		return sms.KindRejected
-	}
-}
-
-func providerRejection(code int) error {
-	return &sms.SendError{
-		Kind:     sms.KindRejected,
-		Provider: "ucloud",
-		Code:     strconv.Itoa(code),
-		Message:  providerErrorMessage,
-	}
-}
-
-func internalError(message string, cause error) error {
-	return &sms.SendError{
-		Kind:     sms.KindInternal,
-		Provider: "ucloud",
-		Message:  message,
-		Cause:    providerutil.OpaqueCause(cause),
+		return failure.Rejected
 	}
 }

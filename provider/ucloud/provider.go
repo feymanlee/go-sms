@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	sms "github.com/feymanlee/go-sms"
+	"github.com/feymanlee/go-sms/failure"
 	"github.com/feymanlee/go-sms/internal/providerutil"
 )
 
@@ -24,6 +25,7 @@ type Provider struct {
 	projectID        string
 	region           string
 	defaultSignature string
+	failures         failure.Factory
 }
 
 var _ sms.Sender = (*Provider)(nil)
@@ -40,6 +42,10 @@ func New(config Config, opts ...Option) (*Provider, error) {
 	}
 	if strings.TrimSpace(config.Region) == "" {
 		return nil, errors.New("ucloud: Region is required")
+	}
+	failures, err := failure.NewFactory("ucloud")
+	if err != nil {
+		return nil, err
 	}
 
 	settings := options{endpoint: defaultEndpoint}
@@ -64,6 +70,7 @@ func New(config Config, opts ...Option) (*Provider, error) {
 		projectID:        config.ProjectID,
 		region:           config.Region,
 		defaultSignature: config.DefaultSignatureRef,
+		failures:         failures,
 	}, nil
 }
 
@@ -102,26 +109,24 @@ func (p *Provider) Send(ctx context.Context, req sms.Request) (sms.Submission, e
 	}
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
-		return sms.Submission{}, internalError("cannot create request", err)
+		return sms.Submission{}, errors.New("ucloud: cannot create request")
 	}
 	httpRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	response, err := p.client.Do(httpRequest)
 	if err != nil {
-		cause := err
-		if contextErr := ctx.Err(); contextErr != nil && !errors.Is(err, contextErr) {
-			cause = errors.Join(err, contextErr)
-		}
-		return sms.Submission{}, providerutil.UnknownOutcome("ucloud", req.Recipient, cause)
+		return sms.Submission{}, p.failures.Unknown(failure.Diagnostic{}, errors.Join(err, ctx.Err()))
 	}
 	if response == nil {
-		return sms.Submission{}, internalError("malformed response", nil)
+		return sms.Submission{}, p.failures.Unknown(failure.Diagnostic{}, ctx.Err())
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		_, _ = io.Copy(io.Discard, response.Body)
-		return sms.Submission{}, &sms.SendError{Kind: httpErrorKind(response.StatusCode), Provider: "ucloud"}
+		return sms.Submission{}, p.failures.Decision(httpErrorCategory(response.StatusCode), failure.Diagnostic{
+			Code: strconv.Itoa(response.StatusCode),
+		})
 	}
 
 	var body struct {
@@ -130,16 +135,18 @@ func (p *Provider) Send(ctx context.Context, req sms.Request) (sms.Submission, e
 		SessionNo string `json:"SessionNo"`
 	}
 	if err := decodeResponse(response.Body, &body); err != nil {
-		return sms.Submission{}, internalError("cannot decode response", err)
+		return sms.Submission{}, p.failures.Unknown(failure.Diagnostic{}, ctx.Err())
 	}
 	if body.RetCode == nil {
-		return sms.Submission{}, internalError("malformed response", nil)
+		return sms.Submission{}, p.failures.Unknown(failure.Diagnostic{}, ctx.Err())
 	}
 	if *body.RetCode != 0 {
-		return sms.Submission{}, providerRejection(*body.RetCode)
+		return sms.Submission{}, p.failures.Decision(failure.Rejected, failure.Diagnostic{
+			Code: strconv.Itoa(*body.RetCode),
+		})
 	}
 	if body.SessionNo == "" {
-		return sms.Submission{}, internalError("malformed response", nil)
+		return sms.Submission{}, p.failures.Unknown(failure.Diagnostic{}, ctx.Err())
 	}
 
 	return sms.Submission{Provider: "ucloud", MessageID: body.SessionNo}, nil
