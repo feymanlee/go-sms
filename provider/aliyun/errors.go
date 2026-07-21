@@ -38,11 +38,11 @@ func classifyError(ctx context.Context, err error, recipient sms.Recipient) erro
 	if sdkError {
 		kind := sms.KindInternal
 		switch {
+		case status == http.StatusTooManyRequests:
+			kind = sms.KindRateLimited
 		case status == http.StatusUnauthorized, status == http.StatusForbidden,
 			code == "InvalidAccessKeyId.NotFound", code == "SignatureDoesNotMatch":
 			kind = sms.KindAuthentication
-		case status == http.StatusTooManyRequests:
-			kind = sms.KindRateLimited
 		case status >= http.StatusInternalServerError, isUnavailableCode(code):
 			kind = sms.KindUnavailable
 		}

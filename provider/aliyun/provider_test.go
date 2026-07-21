@@ -192,6 +192,7 @@ func TestSendClassifiesSDKError(t *testing.T) {
 		{name: "forbidden", code: "Forbidden", status: http.StatusForbidden, want: sms.ErrAuthentication},
 		{name: "access key", code: "InvalidAccessKeyId.NotFound", status: http.StatusBadRequest, want: sms.ErrAuthentication},
 		{name: "rate limited", code: "Throttling.User", status: http.StatusTooManyRequests, want: sms.ErrRateLimited},
+		{name: "rate limited auth-like code", code: "InvalidAccessKeyId.NotFound", status: http.StatusTooManyRequests, want: sms.ErrRateLimited},
 		{name: "server error", code: "ServerError", status: http.StatusBadGateway, want: sms.ErrUnavailable},
 		{name: "service unavailable", code: "ServiceUnavailable", status: http.StatusBadRequest, want: sms.ErrUnavailable},
 		{name: "unknown SDK error", code: "ClientError", status: http.StatusBadRequest, want: sms.ErrInternal},
