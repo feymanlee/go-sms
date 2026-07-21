@@ -68,5 +68,5 @@ func (e *SendError) Is(target error) bool {
 		KindUnknownOutcome: ErrUnknownOutcome,
 		KindInternal:       ErrInternal,
 	}
-	return target == sentinels[e.Kind] || errors.Is(e.Cause, target)
+	return target == sentinels[e.Kind]
 }
