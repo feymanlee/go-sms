@@ -30,7 +30,7 @@ func TestSendPostsTemplateFormAndReturnsSubmission(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		const want = "apikey=api-key&mobile=13812345678&tpl_id=template-1&tpl_value=%23code%23%3D123456%26%23minutes%23%3D5"
+		const want = "apikey=api-key&mobile=%2B8613812345678&tpl_id=template-1&tpl_value=%23code%23%3D123456%26%23minutes%23%3D5"
 		if got := string(body); got != want {
 			t.Errorf("form = %q, want %q", got, want)
 		}
@@ -40,6 +40,9 @@ func TestSendPostsTemplateFormAndReturnsSubmission(t *testing.T) {
 		}
 		if got := form.Get("tpl_value"); got != "#code#=123456&#minutes#=5" {
 			t.Errorf("tpl_value = %q", got)
+		}
+		if got := form.Get("mobile"); got != "+8613812345678" {
+			t.Errorf("mobile = %q", got)
 		}
 		if got := form.Get("signature"); got != "" {
 			t.Errorf("signature = %q", got)
@@ -60,6 +63,30 @@ func TestSendPostsTemplateFormAndReturnsSubmission(t *testing.T) {
 	}
 	if got, want := submission.Metadata, map[string]string{"count": "1", "fee": "0.05", "unit": "RMB"}; !sameMetadata(got, want) {
 		t.Fatalf("Metadata = %#v, want %#v", got, want)
+	}
+}
+
+func TestSendPreservesNonChineseE164Recipient(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		if got := r.Form.Get("mobile"); got != "+12025550123" {
+			t.Errorf("mobile = %q", got)
+		}
+		_, _ = io.WriteString(w, `{"code":0,"sid":1}`)
+	}))
+	defer server.Close()
+
+	req := testRequest(t)
+	recipient, err := sms.ParseRecipient("+12025550123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Recipient = recipient
+
+	if _, err := testProvider(t, server.Client(), server.URL).Send(context.Background(), req); err != nil {
+		t.Fatal(err)
 	}
 }
 

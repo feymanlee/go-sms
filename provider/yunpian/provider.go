@@ -63,19 +63,9 @@ func (p *Provider) Send(ctx context.Context, req sms.Request) (sms.Submission, e
 		}
 	}
 
-	mobile, err := providerutil.ChinaNational(req.Recipient.String())
-	if err != nil {
-		return sms.Submission{}, &sms.SendError{
-			Kind:     sms.KindInvalidRequest,
-			Provider: "yunpian",
-			Message:  providerutil.Sanitize(err.Error(), req.Recipient),
-			Cause:    err,
-		}
-	}
-
 	form := url.Values{
 		"apikey":    {p.apiKey},
-		"mobile":    {mobile},
+		"mobile":    {req.Recipient.String()},
 		"tpl_id":    {req.Message.TemplateID},
 		"tpl_value": {templateValue(req.Message.Params)},
 	}
