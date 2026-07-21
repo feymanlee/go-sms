@@ -12,8 +12,10 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	sms "github.com/feymanlee/go-sms"
+	"github.com/feymanlee/go-sms/failure"
 )
 
 func TestSendPostsTemplateFormAndReturnsSubmission(t *testing.T) {
@@ -116,7 +118,8 @@ func TestSendDoesNotFollowRedirects(t *testing.T) {
 	defer server.Close()
 
 	_, err := testProvider(t, server.Client(), server.URL).Send(context.Background(), testRequest(t))
-	if !errors.Is(err, sms.ErrRejected) || targetCalls.Load() != 0 {
+	requireFailure(t, err, failure.Rejected)
+	if targetCalls.Load() != 0 {
 		t.Fatalf("error = %v, target calls = %d", err, targetCalls.Load())
 	}
 }
@@ -131,7 +134,10 @@ func TestSendRejectsEmptyTemplateParameterWithoutHTTPAttempt(t *testing.T) {
 	req.Message.Params[1].Value = ""
 
 	_, err := testProvider(t, client, "https://example.invalid").Send(context.Background(), req)
-	if !errors.Is(err, sms.ErrInvalidRequest) || calls.Load() != 0 {
+	if err == nil {
+		t.Fatal("Send returned nil error")
+	}
+	if _, ok := failure.From(err); ok || calls.Load() != 0 {
 		t.Fatalf("error = %v, calls = %d", err, calls.Load())
 	}
 }
@@ -146,22 +152,25 @@ func TestSendDoesNotCallTransportForCanceledContext(t *testing.T) {
 	})}
 
 	_, err := testProvider(t, client, "https://example.invalid").Send(ctx, testRequest(t))
-	if !errors.Is(err, context.Canceled) || calls.Load() != 0 {
+	if err == nil {
+		t.Fatal("Send returned nil error")
+	}
+	if _, ok := failure.From(err); ok || !errors.Is(err, context.Canceled) || calls.Load() != 0 {
 		t.Fatalf("error = %v, calls = %d", err, calls.Load())
 	}
 }
 
 func TestSendClassifiesHTTPResponses(t *testing.T) {
 	tests := []struct {
-		name   string
-		status int
-		want   error
+		name     string
+		status   int
+		category failure.Category
 	}{
-		{name: "unauthorized", status: http.StatusUnauthorized, want: sms.ErrAuthentication},
-		{name: "forbidden", status: http.StatusForbidden, want: sms.ErrAuthentication},
-		{name: "rate limited", status: http.StatusTooManyRequests, want: sms.ErrRateLimited},
-		{name: "unavailable", status: http.StatusBadGateway, want: sms.ErrUnavailable},
-		{name: "rejected", status: http.StatusBadRequest, want: sms.ErrRejected},
+		{name: "unauthorized", status: http.StatusUnauthorized, category: failure.Authentication},
+		{name: "forbidden", status: http.StatusForbidden, category: failure.Authentication},
+		{name: "rate limited", status: http.StatusTooManyRequests, category: failure.RateLimited},
+		{name: "unavailable", status: http.StatusBadGateway, category: failure.Unavailable},
+		{name: "rejected", status: http.StatusBadRequest, category: failure.Rejected},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -172,57 +181,62 @@ func TestSendClassifiesHTTPResponses(t *testing.T) {
 			defer server.Close()
 
 			_, err := testProvider(t, server.Client(), server.URL).Send(context.Background(), testRequest(t))
-			var detail *sms.SendError
-			if !errors.Is(err, tt.want) || !errors.As(err, &detail) || detail.Code != strconv.Itoa(tt.status) || detail.Message != non2xxMessage {
-				t.Fatalf("error = %v, detail = %#v", err, detail)
+			got := requireFailure(t, err, tt.category)
+			if details := got.Details(); details.Code != strconv.Itoa(tt.status) {
+				t.Fatalf("details = %#v", details)
 			}
 		})
 	}
 }
 
-func TestSendClassifiesYunpianRejectionWithoutExposingRemoteText(t *testing.T) {
+func TestSendClassifiesYunpianRejectionsWithoutExposingRemoteText(t *testing.T) {
 	const remote = `request +8613812345678 and +12025550123, Authorization: Bearer private-token, body={"mobile":"13812345678"}`
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, `{"code":42,"msg":`+quoteJSON(remote)+`,"detail":`+quoteJSON(remote)+`}`)
-	}))
-	defer server.Close()
-
-	_, err := testProvider(t, server.Client(), server.URL).Send(context.Background(), testRequest(t))
-	var detail *sms.SendError
-	if !errors.Is(err, sms.ErrRejected) || !errors.As(err, &detail) || detail.Code != "42" || detail.Message != providerRejectionMessage {
-		t.Fatalf("error = %v, detail = %#v", err, detail)
-	}
-	for _, secret := range []string{"+8613812345678", "+12025550123", "private-token", `{"mobile":"13812345678"}`} {
-		if strings.Contains(err.Error(), secret) || strings.Contains(detail.Message, secret) {
-			t.Fatalf("remote text leaked %q: error=%q message=%q", secret, err, detail.Message)
-		}
-	}
-}
-
-func TestSendRejectsMalformedOrIncompleteJSON(t *testing.T) {
-	for _, body := range []string{
-		"not JSON for +8613812345678",
-		`{"code":0}`,
-		`{"sid":1}`,
-		`{"code":0,"sid":1} trailing garbage`,
-		`{"code":0,"sid":1}{"code":0,"sid":2}`,
-	} {
-		t.Run(body, func(t *testing.T) {
+	for _, code := range []string{"42", "9007199254740993"} {
+		t.Run(code, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				_, _ = io.WriteString(w, body)
+				_, _ = io.WriteString(w, `{"code":`+code+`,"msg":`+quoteJSON(remote)+`,"detail":`+quoteJSON(remote)+`}`)
 			}))
 			defer server.Close()
 
 			_, err := testProvider(t, server.Client(), server.URL).Send(context.Background(), testRequest(t))
-			var detail *sms.SendError
-			if !errors.Is(err, sms.ErrInternal) || !errors.As(err, &detail) || strings.Contains(detail.Message, "13812345678") {
-				t.Fatalf("error = %v, detail = %#v", err, detail)
+			got := requireFailure(t, err, failure.Rejected)
+			if details := got.Details(); details.Code != code {
+				t.Fatalf("details = %#v", details)
+			}
+			for _, secret := range []string{"+8613812345678", "+12025550123", "private-token", `{"mobile":"13812345678"}`} {
+				if strings.Contains(err.Error(), secret) {
+					t.Fatalf("remote text leaked %q: error=%q", secret, err)
+				}
 			}
 		})
 	}
 }
 
-func TestSendReturnsPrivateUnknownOutcomeAfterTransportError(t *testing.T) {
+func TestSendReturnsUnknownOutcomeForMalformedOrIncompleteJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "decode failure", body: "not JSON for +8613812345678"},
+		{name: "missing SID", body: `{"code":0}`},
+		{name: "missing Code", body: `{"sid":1}`},
+		{name: "trailing garbage", body: `{"code":0,"sid":1} trailing garbage`},
+		{name: "second document", body: `{"code":0,"sid":1}{"code":0,"sid":2}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			defer server.Close()
+
+			_, err := testProvider(t, server.Client(), server.URL).Send(context.Background(), testRequest(t))
+			requireFailure(t, err, failure.UnknownOutcome)
+		})
+	}
+}
+
+func TestSendReturnsUnknownOutcomeAfterTransportError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cause := &secretTransportError{recipient: "+8613812345678", credential: "Bearer private-token"}
@@ -234,9 +248,9 @@ func TestSendReturnsPrivateUnknownOutcomeAfterTransportError(t *testing.T) {
 	})}
 
 	_, err := testProvider(t, client, "https://example.invalid").Send(ctx, testRequest(t))
-	var detail *sms.SendError
-	if !errors.Is(err, sms.ErrUnknownOutcome) || !errors.Is(err, cause) || !errors.Is(err, context.Canceled) || !errors.As(err, &detail) || calls.Load() != 1 {
-		t.Fatalf("error = %v, detail = %#v, calls = %d", err, detail, calls.Load())
+	requireFailure(t, err, failure.UnknownOutcome)
+	if errors.Is(err, cause) || !errors.Is(err, context.Canceled) || calls.Load() != 1 {
+		t.Fatalf("error = %v, calls = %d", err, calls.Load())
 	}
 	if strings.Contains(err.Error(), cause.recipient) || strings.Contains(err.Error(), cause.credential) {
 		t.Fatalf("transport error leaked: %q", err)
@@ -244,6 +258,59 @@ func TestSendReturnsPrivateUnknownOutcomeAfterTransportError(t *testing.T) {
 	var recovered *secretTransportError
 	if errors.As(err, &recovered) {
 		t.Fatalf("raw transport error leaked through chain: %#v", recovered)
+	}
+}
+
+func TestSendReturnsUnknownOutcomeForNilResponse(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, nil
+	})}
+
+	_, err := testProvider(t, client, "https://example.invalid").Send(context.Background(), testRequest(t))
+	requireFailure(t, err, failure.UnknownOutcome)
+}
+
+func TestSendRecordsTransportContextEvidence(t *testing.T) {
+	tests := []struct {
+		name    string
+		context func() (context.Context, context.CancelFunc)
+		want    error
+	}{
+		{name: "canceled", context: func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) }, want: context.Canceled},
+		{name: "deadline exceeded", context: func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), 10*time.Millisecond)
+		}, want: context.DeadlineExceeded},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := tt.context()
+			defer cancel()
+			client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if tt.want == context.Canceled {
+					cancel()
+				} else {
+					<-req.Context().Done()
+				}
+				return nil, errors.New("transport failure")
+			})}
+
+			_, err := testProvider(t, client, "https://example.invalid").Send(ctx, testRequest(t))
+			requireFailure(t, err, failure.UnknownOutcome)
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("error = %v, want %v", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestSendReturnsOrdinaryErrorWhenRequestCannotBeCreated(t *testing.T) {
+	_, err := testProvider(t, http.DefaultClient, "://invalid").Send(context.Background(), testRequest(t))
+	if err == nil {
+		t.Fatal("Send returned nil error")
+	}
+	if _, ok := failure.From(err); ok {
+		t.Fatalf("request construction returned Failure: %v", err)
 	}
 }
 
@@ -260,6 +327,18 @@ func testProvider(t *testing.T, client *http.Client, endpoint string) *Provider 
 		t.Fatal(err)
 	}
 	return provider
+}
+
+func requireFailure(t *testing.T, err error, category failure.Category) failure.Failure {
+	t.Helper()
+	got, ok := failure.From(err)
+	if !ok {
+		t.Fatalf("error is not a Failure: %v", err)
+	}
+	if got.Category() != category {
+		t.Fatalf("category=%q want=%q", got.Category(), category)
+	}
+	return got
 }
 
 func testRequest(t *testing.T) sms.Request {

@@ -3,27 +3,18 @@ package yunpian
 import (
 	"net/http"
 
-	sms "github.com/feymanlee/go-sms"
+	"github.com/feymanlee/go-sms/failure"
 )
 
-const (
-	non2xxMessage            = "yunpian request failed"
-	providerRejectionMessage = "yunpian rejected request"
-)
-
-func httpErrorKind(status int) sms.ErrorKind {
+func httpErrorCategory(status int) failure.Category {
 	switch {
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:
-		return sms.KindAuthentication
+		return failure.Authentication
 	case status == http.StatusTooManyRequests:
-		return sms.KindRateLimited
+		return failure.RateLimited
 	case status >= http.StatusInternalServerError && status <= 599:
-		return sms.KindUnavailable
+		return failure.Unavailable
 	default:
-		return sms.KindRejected
+		return failure.Rejected
 	}
-}
-
-func internalError(message string) error {
-	return &sms.SendError{Kind: sms.KindInternal, Provider: "yunpian", Message: message}
 }

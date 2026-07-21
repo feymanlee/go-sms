@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	sms "github.com/feymanlee/go-sms"
+	"github.com/feymanlee/go-sms/failure"
 	"github.com/feymanlee/go-sms/internal/providerutil"
 )
 
@@ -20,6 +21,7 @@ type Provider struct {
 	client   *http.Client
 	endpoint string
 	apiKey   string
+	failures failure.Factory
 }
 
 var _ sms.Sender = (*Provider)(nil)
@@ -27,6 +29,10 @@ var _ sms.Sender = (*Provider)(nil)
 func New(config Config, opts ...Option) (*Provider, error) {
 	if strings.TrimSpace(config.APIKey) == "" {
 		return nil, errors.New("yunpian: APIKey is required")
+	}
+	failures, err := failure.NewFactory("yunpian")
+	if err != nil {
+		return nil, err
 	}
 
 	settings := options{endpoint: defaultEndpoint}
@@ -46,7 +52,7 @@ func New(config Config, opts ...Option) (*Provider, error) {
 		return http.ErrUseLastResponse
 	}
 
-	return &Provider{client: &client, endpoint: settings.endpoint, apiKey: config.APIKey}, nil
+	return &Provider{client: &client, endpoint: settings.endpoint, apiKey: config.APIKey, failures: failures}, nil
 }
 
 func (p *Provider) Send(ctx context.Context, req sms.Request) (sms.Submission, error) {
@@ -55,11 +61,7 @@ func (p *Provider) Send(ctx context.Context, req sms.Request) (sms.Submission, e
 	}
 	for _, param := range req.Message.Params {
 		if strings.TrimSpace(param.Value) == "" {
-			return sms.Submission{}, &sms.SendError{
-				Kind:     sms.KindInvalidRequest,
-				Provider: "yunpian",
-				Message:  "template parameter value is required",
-			}
+			return sms.Submission{}, errors.New("yunpian: template parameter value is required")
 		}
 	}
 
@@ -71,50 +73,40 @@ func (p *Provider) Send(ctx context.Context, req sms.Request) (sms.Submission, e
 	}
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
-		return sms.Submission{}, internalError("cannot create request")
+		return sms.Submission{}, errors.New("yunpian: cannot create request")
 	}
 	httpRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	response, err := p.client.Do(httpRequest)
 	if err != nil {
-		cause := err
-		if contextErr := ctx.Err(); contextErr != nil && !errors.Is(err, contextErr) {
-			cause = errors.Join(err, contextErr)
-		}
-		return sms.Submission{}, providerutil.UnknownOutcome("yunpian", req.Recipient, cause)
+		return sms.Submission{}, p.failures.Unknown(failure.Diagnostic{}, errors.Join(err, ctx.Err()))
 	}
 	if response == nil {
-		return sms.Submission{}, internalError("malformed response")
+		return sms.Submission{}, p.failures.Unknown(failure.Diagnostic{}, ctx.Err())
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		_, _ = io.Copy(io.Discard, response.Body)
-		return sms.Submission{}, &sms.SendError{
-			Kind:     httpErrorKind(response.StatusCode),
-			Provider: "yunpian",
-			Code:     strconv.Itoa(response.StatusCode),
-			Message:  non2xxMessage,
-		}
+		return sms.Submission{}, p.failures.Decision(httpErrorCategory(response.StatusCode), failure.Diagnostic{
+			Code: strconv.Itoa(response.StatusCode),
+		})
 	}
 
 	var body yunpianResponse
 	if err := decodeResponse(response.Body, &body); err != nil {
-		return sms.Submission{}, internalError("cannot decode response")
+		return sms.Submission{}, p.failures.Unknown(failure.Diagnostic{}, ctx.Err())
 	}
 	if body.Code == "" {
-		return sms.Submission{}, internalError("malformed response")
+		return sms.Submission{}, p.failures.Unknown(failure.Diagnostic{}, ctx.Err())
 	}
 	if body.Code != "0" {
-		return sms.Submission{}, &sms.SendError{
-			Kind:     sms.KindRejected,
-			Provider: "yunpian",
-			Code:     body.Code.String(),
-			Message:  providerRejectionMessage,
-		}
+		return sms.Submission{}, p.failures.Decision(failure.Rejected, failure.Diagnostic{
+			Code: body.Code.String(),
+		})
 	}
 	if body.SID == "" {
-		return sms.Submission{}, internalError("malformed response")
+		return sms.Submission{}, p.failures.Unknown(failure.Diagnostic{}, ctx.Err())
 	}
 
 	metadata := map[string]string{}
