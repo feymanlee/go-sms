@@ -287,7 +287,7 @@ func TestSendReturnsUnknownOutcomeAfterTransportError(t *testing.T) {
 	}
 }
 
-func TestSendReturnsUnknownOutcomeForNilResponse(t *testing.T) {
+func TestSendReturnsUnknownOutcomeForInvalidRoundTripperResult(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return nil, nil
 	})}
