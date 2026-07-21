@@ -32,16 +32,18 @@ unless a different client transport is injected.
 
 ## Output and release records
 
-On acceptance, live test logs include the UTC date, Provider, and the complete
-`MessageID` and `RequestID` returned by that Provider. This complete identifier
-output is permitted only as ephemeral local verification output. Never commit,
-attach, or otherwise preserve the raw test output in the repository.
+On acceptance, ephemeral local live output may include the UTC date, Provider,
+and complete `MessageID` and `RequestID` values returned by that Provider. The
+only complete identifiers permitted in that output are `MessageID` and
+`RequestID`. Never commit, attach, or otherwise preserve raw test output.
 
 For release notes, manually redact each `MessageID` and `RequestID` before
 recording the UTC date, Provider, and verification result. A release-note entry
 must never contain a complete identifier.
 
-Credentials, complete Recipient values, template parameter values, complete
-request bodies, shell-history exports, and test output containing those values
-must never be logged or committed. Before committing release notes, inspect the
-diff and repository search results for accidental sensitive values.
+Credentials, Recipient content, template parameter values, request-body
+content, shell-history exports, and test output containing those values must
+never be logged or committed. This prohibition includes partial or redacted
+Recipient and request-body content: none may appear in any log or record.
+Before committing release notes, inspect the diff and repository search results
+for accidental sensitive values.

@@ -30,10 +30,9 @@ func Env(t *testing.T, names ...string) map[string]string {
 	return values
 }
 
-func Send(t *testing.T, sender sms.Sender, templateID, signatureRef string) {
+func Send(t *testing.T, sender sms.Sender, values map[string]string, templateID, signatureRef string) {
 	t.Helper()
-	common := Env(t, "GO_SMS_TEST_RECIPIENT", "GO_SMS_TEST_PARAM_NAME", "GO_SMS_TEST_PARAM_VALUE")
-	recipient, err := sms.ParseRecipient(common["GO_SMS_TEST_RECIPIENT"])
+	recipient, err := sms.ParseRecipient(values["GO_SMS_TEST_RECIPIENT"])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,8 +45,8 @@ func Send(t *testing.T, sender sms.Sender, templateID, signatureRef string) {
 			TemplateID: templateID,
 			Params: []sms.TemplateParam{
 				{
-					Name:  common["GO_SMS_TEST_PARAM_NAME"],
-					Value: common["GO_SMS_TEST_PARAM_VALUE"],
+					Name:  values["GO_SMS_TEST_PARAM_NAME"],
+					Value: values["GO_SMS_TEST_PARAM_VALUE"],
 				},
 			},
 		},
