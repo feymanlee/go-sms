@@ -17,6 +17,7 @@ import (
 	"github.com/alibabacloud-go/tea/dara"
 	"github.com/alibabacloud-go/tea/tea"
 	sms "github.com/feymanlee/go-sms"
+	"github.com/feymanlee/go-sms/failure"
 )
 
 type fakeClient struct {
@@ -68,19 +69,25 @@ func response(code, message, bizID, requestID string) *ali.SendSmsResponse {
 	}}
 }
 
-func testProvider(fake *fakeClient) *Provider {
+func testProvider(t *testing.T, client apiClient) *Provider {
+	t.Helper()
+	failures, err := failure.NewFactory("aliyun")
+	if err != nil {
+		t.Fatal(err)
+	}
 	autoretry := false
 	maxAttempts := 1
 	return &Provider{
-		client:           fake,
+		client:           client,
 		runtime:          &dara.RuntimeOptions{Autoretry: &autoretry, MaxAttempts: &maxAttempts},
 		defaultSignature: "Default",
+		failures:         failures,
 	}
 }
 
 func TestSendMapsRequestAndReturnsSubmission(t *testing.T) {
 	fake := &fakeClient{response: response("OK", "OK", "biz-1", "request-1")}
-	provider := testProvider(fake)
+	provider := testProvider(t, fake)
 	ctx := context.Background()
 
 	submission, err := provider.Send(ctx, testRequest(t))
@@ -121,7 +128,7 @@ func TestSendUsesDefaultSignature(t *testing.T) {
 	req := testRequest(t)
 	req.SignatureRef = ""
 
-	if _, err := testProvider(fake).Send(context.Background(), req); err != nil {
+	if _, err := testProvider(t, fake).Send(context.Background(), req); err != nil {
 		t.Fatal(err)
 	}
 	if fake.calls != 1 || tea.StringValue(fake.req.SignName) != "Default" {
@@ -138,7 +145,7 @@ func TestSendRejectsNonChinaRecipientBeforeCallingClient(t *testing.T) {
 	}
 	req.Recipient = recipient
 
-	_, err = testProvider(fake).Send(context.Background(), req)
+	_, err = testProvider(t, fake).Send(context.Background(), req)
 	if !errors.Is(err, sms.ErrInvalidRequest) || fake.calls != 0 {
 		t.Fatalf("error = %v, calls = %d", err, fake.calls)
 	}
@@ -147,35 +154,39 @@ func TestSendRejectsNonChinaRecipientBeforeCallingClient(t *testing.T) {
 func TestSendMapsBusinessLimitControlToRateLimited(t *testing.T) {
 	fake := &fakeClient{response: response("isv.BUSINESS_LIMIT_CONTROL", "frequency limit", "", "request-2")}
 
-	_, err := testProvider(fake).Send(context.Background(), testRequest(t))
-	if !errors.Is(err, sms.ErrRateLimited) || fake.calls != 1 {
+	_, err := testProvider(t, fake).Send(context.Background(), testRequest(t))
+	got := requireFailure(t, err, failure.RateLimited)
+	if fake.calls != 1 {
 		t.Fatalf("error = %v, calls = %d", err, fake.calls)
 	}
-	var detail *sms.SendError
-	if !errors.As(err, &detail) || detail.Code != "isv.BUSINESS_LIMIT_CONTROL" || detail.RequestID != "request-2" {
-		t.Fatalf("detail = %#v", detail)
+	if details := got.Details(); details.Code != "isv.BUSINESS_LIMIT_CONTROL" || details.RequestID != "request-2" {
+		t.Fatalf("details = %#v", details)
 	}
 }
 
 func TestSendClassifiesBodyCodes(t *testing.T) {
 	tests := []struct {
-		name string
-		code string
-		want error
+		name     string
+		code     string
+		category failure.Category
 	}{
-		{name: "day limit", code: "isv.DAY_LIMIT_CONTROL", want: sms.ErrRateLimited},
-		{name: "access key", code: "InvalidAccessKeyId.NotFound", want: sms.ErrAuthentication},
-		{name: "signature", code: "SignatureDoesNotMatch", want: sms.ErrAuthentication},
-		{name: "service unavailable", code: "ServiceUnavailable", want: sms.ErrUnavailable},
-		{name: "system error", code: "isp.SYSTEM_ERROR", want: sms.ErrUnavailable},
-		{name: "other business rejection", code: "isv.TEMPLATE_ILLEGAL", want: sms.ErrRejected},
+		{name: "day limit", code: "isv.DAY_LIMIT_CONTROL", category: failure.RateLimited},
+		{name: "access key", code: "InvalidAccessKeyId.NotFound", category: failure.Authentication},
+		{name: "signature", code: "SignatureDoesNotMatch", category: failure.Authentication},
+		{name: "service unavailable", code: "ServiceUnavailable", category: failure.Unavailable},
+		{name: "system error", code: "isp.SYSTEM_ERROR", category: failure.Unavailable},
+		{name: "other business rejection", code: "isv.TEMPLATE_ILLEGAL", category: failure.Rejected},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fake := &fakeClient{response: response(tt.code, "failed", "", "request-body")}
-			_, err := testProvider(fake).Send(context.Background(), testRequest(t))
-			if !errors.Is(err, tt.want) || fake.calls != 1 {
+			_, err := testProvider(t, fake).Send(context.Background(), testRequest(t))
+			got := requireFailure(t, err, tt.category)
+			if fake.calls != 1 {
 				t.Fatalf("error = %v, calls = %d", err, fake.calls)
+			}
+			if details := got.Details(); details.Code != tt.code || details.RequestID != "request-body" {
+				t.Fatalf("details = %#v", details)
 			}
 		})
 	}
@@ -183,19 +194,21 @@ func TestSendClassifiesBodyCodes(t *testing.T) {
 
 func TestSendClassifiesSDKError(t *testing.T) {
 	tests := []struct {
-		name   string
-		code   string
-		status int
-		want   error
+		name     string
+		code     string
+		status   int
+		category failure.Category
 	}{
-		{name: "unauthorized", code: "Unauthorized", status: http.StatusUnauthorized, want: sms.ErrAuthentication},
-		{name: "forbidden", code: "Forbidden", status: http.StatusForbidden, want: sms.ErrAuthentication},
-		{name: "access key", code: "InvalidAccessKeyId.NotFound", status: http.StatusBadRequest, want: sms.ErrAuthentication},
-		{name: "rate limited", code: "Throttling.User", status: http.StatusTooManyRequests, want: sms.ErrRateLimited},
-		{name: "rate limited auth-like code", code: "InvalidAccessKeyId.NotFound", status: http.StatusTooManyRequests, want: sms.ErrRateLimited},
-		{name: "server error", code: "ServerError", status: http.StatusBadGateway, want: sms.ErrUnavailable},
-		{name: "service unavailable", code: "ServiceUnavailable", status: http.StatusBadRequest, want: sms.ErrUnavailable},
-		{name: "unknown SDK error", code: "ClientError", status: http.StatusBadRequest, want: sms.ErrInternal},
+		{name: "HTTP 429 wins over authentication code", code: "InvalidAccessKeyId.NotFound", status: http.StatusTooManyRequests, category: failure.RateLimited},
+		{name: "HTTP 401 wins over throttling code", code: "isv.DAY_LIMIT_CONTROL", status: http.StatusUnauthorized, category: failure.Authentication},
+		{name: "HTTP 403 wins over unavailable code", code: "ServiceUnavailable", status: http.StatusForbidden, category: failure.Authentication},
+		{name: "HTTP 5xx wins over throttling code", code: "isv.BUSINESS_LIMIT_CONTROL", status: http.StatusBadGateway, category: failure.Unavailable},
+		{name: "native authentication", code: "SignatureDoesNotMatch", status: http.StatusOK, category: failure.Authentication},
+		{name: "native throttling", code: "isv.DAY_LIMIT_CONTROL", status: http.StatusOK, category: failure.RateLimited},
+		{name: "native unavailable", code: "InternalError.ServerBusy", status: http.StatusOK, category: failure.Unavailable},
+		{name: "other HTTP 4xx", code: "ClientError", status: http.StatusBadRequest, category: failure.Rejected},
+		{name: "no decision without status or known code", code: "ClientError", status: 0, category: failure.UnknownOutcome},
+		{name: "no decision for successful status and unknown code", code: "ClientError", status: http.StatusOK, category: failure.UnknownOutcome},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -206,17 +219,17 @@ func TestSendClassifiesSDKError(t *testing.T) {
 				"data":       map[string]interface{}{"RequestId": "request-sdk"},
 			})
 			fake := &fakeClient{err: native}
-			_, err := testProvider(fake).Send(context.Background(), testRequest(t))
-			if !errors.Is(err, tt.want) || !errors.Is(err, native) || fake.calls != 1 {
+			_, err := testProvider(t, fake).Send(context.Background(), testRequest(t))
+			got := requireFailure(t, err, tt.category)
+			if fake.calls != 1 {
 				t.Fatalf("error = %v, calls = %d", err, fake.calls)
 			}
 			var sdkError *tea.SDKError
-			if errors.As(err, &sdkError) {
+			if errors.Is(err, native) || errors.As(err, &sdkError) {
 				t.Fatalf("SDK error leaked through public error chain: %#v", sdkError)
 			}
-			var detail *sms.SendError
-			if !errors.As(err, &detail) || detail.Code != tt.code || detail.Message != "aliyun SDK request failed" || detail.RequestID != "request-sdk" {
-				t.Fatalf("detail = %#v", detail)
+			if details := got.Details(); details.Code != tt.code || details.RequestID != "request-sdk" {
+				t.Fatalf("details = %#v", details)
 			}
 		})
 	}
@@ -230,33 +243,61 @@ func TestSendClassifiesDaraSDKError(t *testing.T) {
 	})
 	fake := &fakeClient{err: native}
 
-	_, err := testProvider(fake).Send(context.Background(), testRequest(t))
-	if !errors.Is(err, sms.ErrAuthentication) || !errors.Is(err, native) || fake.calls != 1 {
+	_, err := testProvider(t, fake).Send(context.Background(), testRequest(t))
+	got := requireFailure(t, err, failure.Authentication)
+	if fake.calls != 1 {
 		t.Fatalf("error = %v, calls = %d", err, fake.calls)
 	}
 	var sdkError *dara.SDKError
-	if errors.As(err, &sdkError) {
+	if errors.Is(err, native) || errors.As(err, &sdkError) {
 		t.Fatalf("SDK error leaked through public error chain: %#v", sdkError)
+	}
+	if details := got.Details(); details.Code != "SignatureDoesNotMatch" {
+		t.Fatalf("details = %#v", details)
 	}
 }
 
-func TestSendPreservesContextCancellationWithoutSDKErrorCause(t *testing.T) {
+func TestSendReturnsUnknownOutcomeForUndecidableSDKErrorWithContextEvidence(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	native := tea.NewSDKError(map[string]interface{}{
 		"code":       "ClientError",
-		"statusCode": http.StatusBadRequest,
+		"statusCode": http.StatusOK,
 		"message":    "request failed",
 		"data":       map[string]interface{}{"RequestId": "request-sdk"},
 	})
 	fake := &fakeClient{err: native, beforeReturn: cancel}
 
-	_, err := testProvider(fake).Send(ctx, testRequest(t))
-	if !errors.Is(err, sms.ErrUnknownOutcome) || !errors.Is(err, context.Canceled) || !errors.Is(err, native) || fake.calls != 1 {
+	_, err := testProvider(t, fake).Send(ctx, testRequest(t))
+	got := requireFailure(t, err, failure.UnknownOutcome)
+	if !errors.Is(err, context.Canceled) || errors.Is(err, native) || fake.calls != 1 {
 		t.Fatalf("error = %v, calls = %d", err, fake.calls)
 	}
 	var sdkError *tea.SDKError
 	if errors.As(err, &sdkError) {
 		t.Fatalf("SDK error leaked through public error chain: %#v", sdkError)
+	}
+	if details := got.Details(); details.Code != "ClientError" || details.RequestID != "request-sdk" {
+		t.Fatalf("details = %#v", details)
+	}
+}
+
+func TestSendDefinitiveSDKDecisionWinsOverCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	native := tea.NewSDKError(map[string]interface{}{
+		"code":       "InvalidAccessKeyId.NotFound",
+		"statusCode": http.StatusTooManyRequests,
+		"message":    "request failed",
+		"data":       map[string]interface{}{"RequestId": "request-rate"},
+	})
+	fake := &fakeClient{err: native, beforeReturn: cancel}
+
+	_, err := testProvider(t, fake).Send(ctx, testRequest(t))
+	got := requireFailure(t, err, failure.RateLimited)
+	if errors.Is(err, context.Canceled) || fake.calls != 1 {
+		t.Fatalf("error = %v, calls = %d", err, fake.calls)
+	}
+	if details := got.Details(); details.Code != "InvalidAccessKeyId.NotFound" || details.RequestID != "request-rate" {
+		t.Fatalf("details = %#v", details)
 	}
 }
 
@@ -269,13 +310,19 @@ func TestSendClassifiesTransportErrorsAsUnknownOutcome(t *testing.T) {
 		{name: "deadline", err: context.DeadlineExceeded},
 		{name: "network", err: &net.DNSError{Err: "timeout", IsTimeout: true}},
 		{name: "URL", err: &url.Error{Op: "Post", URL: "https://dysmsapi.aliyuncs.com", Err: errors.New("connection reset")}},
+		{name: "ordinary", err: errors.New("SDK request failed")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fake := &fakeClient{err: tt.err}
-			_, err := testProvider(fake).Send(context.Background(), testRequest(t))
-			if !errors.Is(err, sms.ErrUnknownOutcome) || !errors.Is(err, tt.err) || fake.calls != 1 {
+			_, err := testProvider(t, fake).Send(context.Background(), testRequest(t))
+			got := requireFailure(t, err, failure.UnknownOutcome)
+			isContext := tt.err == context.Canceled || tt.err == context.DeadlineExceeded
+			if isContext != errors.Is(err, tt.err) || fake.calls != 1 {
 				t.Fatalf("error = %v, calls = %d", err, fake.calls)
+			}
+			if details := got.Details(); details.Code != "" || details.RequestID != "" {
+				t.Fatalf("details = %#v", details)
 			}
 		})
 	}
@@ -287,15 +334,17 @@ func TestSendPreservesContextCancellationWhenSDKReturnsOpaqueError(t *testing.T)
 	native := errors.New("SDK request aborted")
 	fake := &fakeClient{err: native}
 
-	_, err := testProvider(fake).Send(ctx, testRequest(t))
-	if !errors.Is(err, context.Canceled) || errors.Is(err, sms.ErrUnknownOutcome) || fake.calls != 0 {
+	_, err := testProvider(t, fake).Send(ctx, testRequest(t))
+	_, isFailure := failure.From(err)
+	if !errors.Is(err, context.Canceled) || isFailure || fake.calls != 0 {
 		t.Fatalf("preflight error = %v, calls = %d", err, fake.calls)
 	}
 
 	ctx, cancel = context.WithCancel(context.Background())
 	fake = &fakeClient{err: native, beforeReturn: cancel}
-	_, err = testProvider(fake).Send(ctx, testRequest(t))
-	if !errors.Is(err, sms.ErrUnknownOutcome) || !errors.Is(err, context.Canceled) || !errors.Is(err, native) || fake.calls != 1 {
+	_, err = testProvider(t, fake).Send(ctx, testRequest(t))
+	requireFailure(t, err, failure.UnknownOutcome)
+	if !errors.Is(err, context.Canceled) || errors.Is(err, native) || fake.calls != 1 {
 		t.Fatalf("post-invocation error = %v, calls = %d", err, fake.calls)
 	}
 }
@@ -304,18 +353,15 @@ func TestSendDoesNotExposeUntrustedProviderMessages(t *testing.T) {
 	remoteMessage, secrets := adversarialRemoteMessage(testRequest(t), "access-secret")
 	fake := &fakeClient{response: response("isv.TEMPLATE_ILLEGAL", remoteMessage, "", "request-adversarial")}
 
-	_, err := testProvider(fake).Send(context.Background(), testRequest(t))
-	var detail *sms.SendError
-	if !errors.Is(err, sms.ErrRejected) || !errors.As(err, &detail) {
-		t.Fatalf("error = %v, detail = %#v", err, detail)
+	_, err := testProvider(t, fake).Send(context.Background(), testRequest(t))
+	got := requireFailure(t, err, failure.Rejected)
+	if details := got.Details(); details.Code != "isv.TEMPLATE_ILLEGAL" || details.RequestID != "request-adversarial" {
+		t.Fatalf("details = %#v", details)
 	}
-	if detail.Code != "isv.TEMPLATE_ILLEGAL" || detail.RequestID != "request-adversarial" || detail.Message != "aliyun provider request failed" {
-		t.Fatalf("detail = %#v", detail)
-	}
-	assertNoSensitiveText(t, secrets, err.Error(), detail.Message)
+	assertNoSensitiveText(t, secrets, err.Error())
 }
 
-func TestSendKeepsSDKCauseOpaqueAndMatchable(t *testing.T) {
+func TestSendDoesNotExposeNativeSDKError(t *testing.T) {
 	remoteMessage, secrets := adversarialRemoteMessage(testRequest(t), "access-secret")
 	native := tea.NewSDKError(map[string]interface{}{
 		"code":       "InvalidAccessKeyId.NotFound",
@@ -324,44 +370,29 @@ func TestSendKeepsSDKCauseOpaqueAndMatchable(t *testing.T) {
 		"data":       map[string]interface{}{"RequestId": "request-native"},
 	})
 
-	_, err := testProvider(&fakeClient{err: native}).Send(context.Background(), testRequest(t))
-	var detail *sms.SendError
-	if !errors.Is(err, sms.ErrAuthentication) || !errors.Is(err, native) || !errors.As(err, &detail) {
-		t.Fatalf("error = %v, detail = %#v", err, detail)
-	}
-	if detail.Code != "InvalidAccessKeyId.NotFound" || detail.RequestID != "request-native" || detail.Message != "aliyun SDK request failed" {
-		t.Fatalf("detail = %#v", detail)
+	_, err := testProvider(t, &fakeClient{err: native}).Send(context.Background(), testRequest(t))
+	got := requireFailure(t, err, failure.Authentication)
+	if details := got.Details(); details.Code != "InvalidAccessKeyId.NotFound" || details.RequestID != "request-native" {
+		t.Fatalf("details = %#v", details)
 	}
 	var recovered *tea.SDKError
-	if errors.As(err, &recovered) {
+	if errors.Is(err, native) || errors.As(err, &recovered) {
 		t.Fatalf("raw SDK error leaked through errors.As: %#v", recovered)
 	}
-	if detail.Cause == nil || errors.Unwrap(detail.Cause) != nil {
-		t.Fatalf("cause = %#v", detail.Cause)
-	}
-	assertNoSensitiveText(t, secrets, err.Error(), detail.Message, detail.Cause.Error(), errors.Unwrap(err).Error())
+	assertNoSensitiveText(t, secrets, err.Error())
 }
 
-func TestSendKeepsUnmatchedSDKCauseOpaqueAndMatchable(t *testing.T) {
+func TestSendDoesNotExposeUnmatchedSDKError(t *testing.T) {
 	remoteMessage, secrets := adversarialRemoteMessage(testRequest(t), "access-secret")
 	native := &sensitiveSDKError{message: remoteMessage}
 
-	_, err := testProvider(&fakeClient{err: native}).Send(context.Background(), testRequest(t))
-	var detail *sms.SendError
-	if !errors.Is(err, sms.ErrInternal) || !errors.Is(err, native) || !errors.As(err, &detail) {
-		t.Fatalf("error = %v, detail = %#v", err, detail)
-	}
-	if detail.Message != "aliyun SDK request failed" {
-		t.Fatalf("detail = %#v", detail)
-	}
+	_, err := testProvider(t, &fakeClient{err: native}).Send(context.Background(), testRequest(t))
+	requireFailure(t, err, failure.UnknownOutcome)
 	var recovered *sensitiveSDKError
-	if errors.As(err, &recovered) {
+	if errors.Is(err, native) || errors.As(err, &recovered) {
 		t.Fatalf("raw SDK error leaked through errors.As: %#v", recovered)
 	}
-	if detail.Cause == nil || errors.Unwrap(detail.Cause) != nil {
-		t.Fatalf("cause = %#v", detail.Cause)
-	}
-	assertNoSensitiveText(t, secrets, err.Error(), detail.Message, detail.Cause.Error(), errors.Unwrap(err).Error())
+	assertNoSensitiveText(t, secrets, err.Error())
 }
 
 func TestSendRejectsMalformedResponse(t *testing.T) {
@@ -378,10 +409,10 @@ func TestSendRejectsMalformedResponse(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fake := &fakeClient{response: tt.response}
-			_, err := testProvider(fake).Send(context.Background(), testRequest(t))
-			var detail *sms.SendError
-			if !errors.Is(err, sms.ErrInternal) || !errors.As(err, &detail) || detail.RequestID != tt.requestID || fake.calls != 1 {
-				t.Fatalf("error = %v, detail = %#v, calls = %d", err, detail, fake.calls)
+			_, err := testProvider(t, fake).Send(context.Background(), testRequest(t))
+			got := requireFailure(t, err, failure.UnknownOutcome)
+			if details := got.Details(); details.RequestID != tt.requestID || fake.calls != 1 {
+				t.Fatalf("error = %v, details = %#v, calls = %d", err, details, fake.calls)
 			}
 		})
 	}
@@ -401,13 +432,7 @@ func (c *captureClient) SendSmsWithContext(_ context.Context, req *ali.SendSmsRe
 
 func TestConcurrentSendsBuildFreshRequests(t *testing.T) {
 	client := &captureClient{}
-	autoretry := false
-	maxAttempts := 1
-	provider := &Provider{
-		client:           client,
-		runtime:          &dara.RuntimeOptions{Autoretry: &autoretry, MaxAttempts: &maxAttempts},
-		defaultSignature: "Default",
-	}
+	provider := testProvider(t, client)
 	requests := []sms.Request{testRequest(t), testRequest(t)}
 	requests[0].Message.Params[0].Value = "first"
 	requests[1].Message.Params[0].Value = "second"
@@ -555,6 +580,18 @@ func TestSDKDoesNotFollowRedirectsOrMutateCallerClient(t *testing.T) {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func requireFailure(t *testing.T, err error, category failure.Category) failure.Failure {
+	t.Helper()
+	got, ok := failure.From(err)
+	if !ok {
+		t.Fatalf("error is not a Failure: %v", err)
+	}
+	if got.Category() != category {
+		t.Fatalf("category=%q want=%q", got.Category(), category)
+	}
+	return got
+}
 
 type sensitiveSDKError struct {
 	message string

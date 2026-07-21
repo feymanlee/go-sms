@@ -11,6 +11,7 @@ import (
 	ali "github.com/alibabacloud-go/dysmsapi-20170525/v5/client"
 	"github.com/alibabacloud-go/tea/dara"
 	sms "github.com/feymanlee/go-sms"
+	"github.com/feymanlee/go-sms/failure"
 	"github.com/feymanlee/go-sms/internal/providerutil"
 )
 
@@ -24,6 +25,7 @@ type Provider struct {
 	client           apiClient
 	runtime          *dara.RuntimeOptions
 	defaultSignature string
+	failures         failure.Factory
 }
 
 type daraHTTPClient struct {
@@ -48,6 +50,10 @@ func New(config Config, opts ...Option) (*Provider, error) {
 	}
 	if strings.TrimSpace(config.Region) == "" {
 		return nil, errors.New("aliyun: Region is required")
+	}
+	failures, err := failure.NewFactory("aliyun")
+	if err != nil {
+		return nil, err
 	}
 
 	settings := options{}
@@ -85,6 +91,7 @@ func New(config Config, opts ...Option) (*Provider, error) {
 			MaxAttempts: &maxAttempts,
 		},
 		defaultSignature: config.DefaultSignatureRef,
+		failures:         failures,
 	}, nil
 }
 
@@ -109,7 +116,7 @@ func (p *Provider) Send(ctx context.Context, req sms.Request) (sms.Submission, e
 	}
 	templateParam, err := json.Marshal(params)
 	if err != nil {
-		return sms.Submission{}, internalError("cannot encode template parameters", "", err)
+		return sms.Submission{}, errors.New("aliyun: cannot encode template parameters")
 	}
 	request := &ali.SendSmsRequest{
 		PhoneNumbers:  dara.String(phoneNumber),
@@ -120,25 +127,19 @@ func (p *Provider) Send(ctx context.Context, req sms.Request) (sms.Submission, e
 
 	response, err := p.client.SendSmsWithContext(ctx, request, p.runtime)
 	if err != nil {
-		return sms.Submission{}, classifyError(ctx, err, req.Recipient)
+		return sms.Submission{}, classifyError(ctx, p.failures, err)
 	}
 	requestID := ""
 	if response != nil && response.Body != nil {
 		requestID = dara.StringValue(response.Body.RequestId)
 	}
 	if response == nil || response.Body == nil || dara.StringValue(response.Body.Code) == "" {
-		return sms.Submission{}, internalError("malformed response", requestID, nil)
+		return sms.Submission{}, p.failures.Unknown(failure.Diagnostic{RequestID: requestID}, ctx.Err())
 	}
 
 	code := dara.StringValue(response.Body.Code)
 	if code != "OK" {
-		return sms.Submission{}, &sms.SendError{
-			Kind:      classifyBodyCode(code),
-			Provider:  "aliyun",
-			Code:      code,
-			Message:   providerErrorMessage,
-			RequestID: requestID,
-		}
+		return sms.Submission{}, p.failures.Decision(classifyBodyCode(code), failure.Diagnostic{Code: code, RequestID: requestID})
 	}
 	return sms.Submission{
 		Provider:  "aliyun",

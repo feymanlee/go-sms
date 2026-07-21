@@ -4,71 +4,62 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net"
 	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/alibabacloud-go/tea/dara"
 	"github.com/alibabacloud-go/tea/tea"
-	sms "github.com/feymanlee/go-sms"
-	"github.com/feymanlee/go-sms/internal/providerutil"
+	"github.com/feymanlee/go-sms/failure"
 )
 
-const (
-	providerErrorMessage = "aliyun provider request failed"
-	sdkErrorMessage      = "aliyun SDK request failed"
-)
-
-func classifyBodyCode(code string) sms.ErrorKind {
-	switch code {
-	case "isv.BUSINESS_LIMIT_CONTROL", "isv.DAY_LIMIT_CONTROL":
-		return sms.KindRateLimited
-	case "InvalidAccessKeyId.NotFound", "SignatureDoesNotMatch":
-		return sms.KindAuthentication
+func classifyBodyCode(code string) failure.Category {
+	if category, ok := classifyKnownCode(code); ok {
+		return category
 	}
-	if isUnavailableCode(code) {
-		return sms.KindUnavailable
-	}
-	return sms.KindRejected
+	return failure.Rejected
 }
 
-func classifyError(ctx context.Context, err error, recipient sms.Recipient) error {
+func classifyError(ctx context.Context, failures failure.Factory, err error) error {
 	code, requestID, status, sdkError := sdkErrorDetails(err)
 	if sdkError {
-		kind := sms.KindInternal
-		switch {
-		case status == http.StatusTooManyRequests:
-			kind = sms.KindRateLimited
-		case status == http.StatusUnauthorized, status == http.StatusForbidden,
-			code == "InvalidAccessKeyId.NotFound", code == "SignatureDoesNotMatch":
-			kind = sms.KindAuthentication
-		case status >= http.StatusInternalServerError, isUnavailableCode(code):
-			kind = sms.KindUnavailable
+		diagnostic := failure.Diagnostic{Code: code, RequestID: requestID}
+		if category, ok := classifySDKDecision(status, code); ok {
+			return failures.Decision(category, diagnostic)
 		}
-		cause := err
-		if contextErr := ctx.Err(); contextErr != nil {
-			kind = sms.KindUnknownOutcome
-			cause = errors.Join(err, contextErr)
-		}
-		return &sms.SendError{
-			Kind:      kind,
-			Provider:  "aliyun",
-			Code:      code,
-			Message:   sdkErrorMessage,
-			RequestID: requestID,
-			Cause:     providerutil.OpaqueCause(cause),
-		}
+		return failures.Unknown(diagnostic, errors.Join(err, ctx.Err()))
 	}
+	return failures.Unknown(failure.Diagnostic{}, errors.Join(err, ctx.Err()))
+}
 
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || isNetworkError(err) {
-		return providerutil.UnknownOutcome("aliyun", recipient, err)
+func classifySDKDecision(status int, code string) (failure.Category, bool) {
+	switch {
+	case status == http.StatusTooManyRequests:
+		return failure.RateLimited, true
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		return failure.Authentication, true
+	case status >= 500 && status <= 599:
+		return failure.Unavailable, true
 	}
-	if contextErr := ctx.Err(); contextErr != nil {
-		return providerutil.UnknownOutcome("aliyun", recipient, errors.Join(err, contextErr))
+	if category, ok := classifyKnownCode(code); ok {
+		return category, true
 	}
+	if status >= 400 && status <= 499 {
+		return failure.Rejected, true
+	}
+	return "", false
+}
 
-	return internalError(sdkErrorMessage, "", err)
+func classifyKnownCode(code string) (failure.Category, bool) {
+	switch code {
+	case "InvalidAccessKeyId.NotFound", "SignatureDoesNotMatch":
+		return failure.Authentication, true
+	case "isv.BUSINESS_LIMIT_CONTROL", "isv.DAY_LIMIT_CONTROL":
+		return failure.RateLimited, true
+	}
+	if isUnavailableCode(code) {
+		return failure.Unavailable, true
+	}
+	return "", false
 }
 
 func sdkErrorDetails(err error) (code, requestID string, status int, ok bool) {
@@ -100,23 +91,4 @@ func requestIDFromData(data string) string {
 func isUnavailableCode(code string) bool {
 	return code == "ServiceUnavailable" || strings.HasPrefix(code, "ServiceUnavailable.") ||
 		code == "InternalError" || strings.HasPrefix(code, "InternalError.") || code == "isp.SYSTEM_ERROR"
-}
-
-func isNetworkError(err error) bool {
-	var networkError net.Error
-	if errors.As(err, &networkError) {
-		return true
-	}
-	var urlError *url.Error
-	return errors.As(err, &urlError)
-}
-
-func internalError(message, requestID string, cause error) error {
-	return &sms.SendError{
-		Kind:      sms.KindInternal,
-		Provider:  "aliyun",
-		Message:   message,
-		RequestID: requestID,
-		Cause:     providerutil.OpaqueCause(cause),
-	}
 }
