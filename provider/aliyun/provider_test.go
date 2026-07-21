@@ -408,6 +408,22 @@ func TestNewDisablesSDKRetries(t *testing.T) {
 	}
 }
 
+func TestNewDoesNotReadAlibabaUserAgentEnvironment(t *testing.T) {
+	t.Setenv("ALIBABA_CLOUD_USER_AGENT", "environment-user-agent")
+
+	provider, err := New(Config{AccessKeyID: "id", AccessKeySecret: "secret", Region: "cn-hangzhou"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, ok := provider.client.(*ali.Client)
+	if !ok {
+		t.Fatalf("client = %T, want *client.Client", provider.client)
+	}
+	if got := tea.StringValue(client.UserAgent); got != "go-sms" {
+		t.Fatalf("UserAgent = %q, want %q", got, "go-sms")
+	}
+}
+
 func TestDaraHTTPClientDelegatesToInjectedClient(t *testing.T) {
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		if req.URL.String() != "https://example.com/sms" {

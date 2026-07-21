@@ -18,6 +18,8 @@ type apiClient interface {
 	SendSmsWithContext(context.Context, *ali.SendSmsRequest, *dara.RuntimeOptions) (*ali.SendSmsResponse, error)
 }
 
+const sdkUserAgent = "go-sms"
+
 type Provider struct {
 	client           apiClient
 	runtime          *dara.RuntimeOptions
@@ -63,6 +65,7 @@ func New(config Config, opts ...Option) (*Provider, error) {
 		AccessKeyId:     dara.String(config.AccessKeyID),
 		AccessKeySecret: dara.String(config.AccessKeySecret),
 		RegionId:        dara.String(config.Region),
+		UserAgent:       dara.String(sdkUserAgent),
 		HttpClient:      daraHTTPClient{client: httpClient},
 	}
 	if settings.endpoint != "" {
