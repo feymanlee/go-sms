@@ -40,6 +40,9 @@ func New(config Config, opts ...Option) (*Provider, error) {
 	if strings.TrimSpace(config.Region) == "" {
 		return nil, errors.New("tencent: Region is required")
 	}
+	if tccommon.DefaultHttpClient != nil {
+		return nil, errors.New("tencent: tccommon.DefaultHttpClient must be nil; use WithHTTPClient for provider-specific HTTP configuration")
+	}
 
 	settings := options{}
 	for _, option := range opts {
@@ -104,9 +107,9 @@ func (p *Provider) Send(ctx context.Context, req sms.Request) (sms.Submission, e
 
 	response, err := p.client.SendSmsWithContext(ctx, request)
 	if err != nil {
-		return sms.Submission{}, classifyError(err, req.Recipient)
+		return sms.Submission{}, classifyError(ctx, err, req.Recipient)
 	}
-	if response == nil || response.Response == nil || len(response.Response.SendStatusSet) != 1 || response.Response.SendStatusSet[0] == nil || response.Response.SendStatusSet[0].Code == nil {
+	if response == nil || response.Response == nil || len(response.Response.SendStatusSet) != 1 || response.Response.SendStatusSet[0] == nil || stringValue(response.Response.SendStatusSet[0].Code) == "" {
 		return sms.Submission{}, internalError("malformed response", "", nil)
 	}
 
@@ -115,34 +118,29 @@ func (p *Provider) Send(ctx context.Context, req sms.Request) (sms.Submission, e
 	code := stringValue(status.Code)
 	if code != "Ok" {
 		return sms.Submission{}, &sms.SendError{
-			Kind:      sms.KindRejected,
+			Kind:      classifyStatusCode(code),
 			Provider:  "tencent",
 			Code:      code,
 			Message:   providerutil.Sanitize(stringValue(status.Message), req.Recipient),
 			RequestID: requestID,
 		}
 	}
+	var metadata map[string]string
+	if status.Fee != nil {
+		metadata = map[string]string{"fee": strconv.FormatUint(*status.Fee, 10)}
+	}
 
 	return sms.Submission{
 		Provider:  "tencent",
 		MessageID: stringValue(status.SerialNo),
 		RequestID: requestID,
-		Metadata: map[string]string{
-			"fee": strconv.FormatUint(uint64Value(status.Fee), 10),
-		},
+		Metadata:  metadata,
 	}, nil
 }
 
 func stringValue(value *string) string {
 	if value == nil {
 		return ""
-	}
-	return *value
-}
-
-func uint64Value(value *uint64) uint64 {
-	if value == nil {
-		return 0
 	}
 	return *value
 }

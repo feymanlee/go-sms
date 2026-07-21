@@ -126,6 +126,16 @@ func TestSendRejectsNonOKStatus(t *testing.T) {
 	}
 }
 
+func TestSendClassifiesKnownStatusCode(t *testing.T) {
+	fake := &fakeClient{response: response("LimitExceeded.PhoneNumberThirtySecondLimit", "too frequent", "", 0, "request-2")}
+	provider := &Provider{client: fake, appID: "1400000000"}
+
+	_, err := provider.Send(context.Background(), testRequest(t))
+	if !errors.Is(err, sms.ErrRateLimited) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestSendClassifiesTransportErrorsAsUnknownOutcome(t *testing.T) {
 	tests := []struct {
 		name string
@@ -148,6 +158,50 @@ func TestSendClassifiesTransportErrorsAsUnknownOutcome(t *testing.T) {
 	}
 }
 
+func TestSDKTransportCancellationIsUnknownOutcome(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		cancel()
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	})}
+	provider, err := New(
+		Config{SecretID: "id", SecretKey: "key", SMSAppID: "app", Region: "ap-guangzhou"},
+		WithHTTPClient(client),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = provider.Send(ctx, testRequest(t))
+	if !errors.Is(err, sms.ErrUnknownOutcome) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestSDKNetworkErrorIsUnknownOutcome(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("connection reset")
+	})}
+	provider, err := New(
+		Config{SecretID: "id", SecretKey: "key", SMSAppID: "app", Region: "ap-guangzhou"},
+		WithHTTPClient(client),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = provider.Send(context.Background(), testRequest(t))
+	if !errors.Is(err, sms.ErrUnknownOutcome) {
+		t.Fatalf("error = %v", err)
+	}
+	var detail *sms.SendError
+	var native *tcerr.TencentCloudSDKError
+	if !errors.As(err, &detail) || !errors.As(err, &native) || native.Code != "ClientError.NetworkError" || detail.Cause != native {
+		t.Fatalf("native error = %#v", native)
+	}
+}
+
 func TestSendClassifiesNativeErrors(t *testing.T) {
 	tests := []struct {
 		code string
@@ -156,10 +210,12 @@ func TestSendClassifiesNativeErrors(t *testing.T) {
 		{code: "AuthFailure.SecretIdNotFound", want: sms.ErrAuthentication},
 		{code: "InvalidCredential", want: sms.ErrAuthentication},
 		{code: "InvalidCredential.Expired", want: sms.ErrAuthentication},
+		{code: "UnauthorizedOperation.RequestPermissionDeny", want: sms.ErrAuthentication},
 		{code: "RequestLimitExceeded", want: sms.ErrRateLimited},
 		{code: "RequestLimitExceeded.Global", want: sms.ErrRateLimited},
 		{code: "LimitExceeded.PhoneNumberDailyLimit", want: sms.ErrRateLimited},
 		{code: "InternalError", want: sms.ErrUnavailable},
+		{code: "InternalErrorUnexpected", want: sms.ErrUnavailable},
 		{code: "ResourceUnavailable.ServiceBusy", want: sms.ErrUnavailable},
 		{code: "UnsupportedOperation", want: sms.ErrInternal},
 	}
@@ -203,6 +259,7 @@ func TestSendRejectsMalformedResponses(t *testing.T) {
 		{name: "multiple statuses", response: &tc.SendSmsResponse{Response: &tc.SendSmsResponseParams{SendStatusSet: []*tc.SendStatus{{}, {}}}}},
 		{name: "nil status", response: &tc.SendSmsResponse{Response: &tc.SendSmsResponseParams{SendStatusSet: []*tc.SendStatus{nil}}}},
 		{name: "missing status code", response: &tc.SendSmsResponse{Response: &tc.SendSmsResponseParams{SendStatusSet: []*tc.SendStatus{{}}}}},
+		{name: "empty status code", response: response("", "", "", 0, "request-6")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -212,6 +269,20 @@ func TestSendRejectsMalformedResponses(t *testing.T) {
 				t.Fatalf("error = %v", err)
 			}
 		})
+	}
+}
+
+func TestSendOmitsFeeMetadataWhenFeeIsMissing(t *testing.T) {
+	accepted := response("Ok", "send success", "serial-1", 0, "request-1")
+	accepted.Response.SendStatusSet[0].Fee = nil
+	provider := &Provider{client: &fakeClient{response: accepted}, appID: "1400000000"}
+
+	submission, err := provider.Send(context.Background(), testRequest(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := submission.Metadata["fee"]; exists {
+		t.Fatalf("fee metadata = %q", submission.Metadata["fee"])
 	}
 }
 
@@ -246,6 +317,32 @@ func TestNewValidatesConfig(t *testing.T) {
 				t.Fatal("New returned nil error")
 			}
 		})
+	}
+}
+
+func TestNewRejectsTencentGlobalHTTPClientWithoutMutation(t *testing.T) {
+	original := tccommon.DefaultHttpClient
+	globalClient := &http.Client{Timeout: 37 * time.Second, Transport: http.DefaultTransport}
+	tccommon.DefaultHttpClient = globalClient
+	t.Cleanup(func() { tccommon.DefaultHttpClient = original })
+
+	_, err := New(
+		Config{SecretID: "id", SecretKey: "key", SMSAppID: "app", Region: "ap-guangzhou"},
+		WithHTTPClient(&http.Client{Timeout: 2 * time.Second, Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("unused")
+		})}),
+	)
+	if err == nil || !strings.Contains(err.Error(), "DefaultHttpClient") || !strings.Contains(err.Error(), "WithHTTPClient") {
+		t.Errorf("error = %v", err)
+	}
+	if tccommon.DefaultHttpClient != globalClient {
+		t.Error("Tencent global client pointer changed")
+	}
+	if globalClient.Timeout != 37*time.Second {
+		t.Errorf("Tencent global client timeout = %s", globalClient.Timeout)
+	}
+	if globalClient.Transport != http.DefaultTransport {
+		t.Error("Tencent global client transport changed")
 	}
 }
 
