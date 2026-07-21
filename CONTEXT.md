@@ -13,8 +13,12 @@ One non-retried request submitted to exactly one Provider. Version 1 does not ro
 _Avoid_: Dispatch, delivery
 
 **Send Failure**:
-An unsuccessful or indeterminate Send Attempt, described by a stable failure category while retaining the Provider's native diagnostic details.
+An unsuccessful or indeterminate Send Attempt after the request has crossed the Provider seam. Validation, cancellation, or implementation errors before submission are not Send Failures. A Send Failure exposes only safe structured Provider diagnostics.
 _Avoid_: Provider error, send error
+
+**Failure Category**:
+A library-owned classification of a Send Failure: Authentication, Rate Limited, Rejected, Unavailable, or Unknown Outcome. Provider-native codes are mapped to a Failure Category by the selected Provider adapter.
+_Avoid_: Error kind, retryable flag
 
 **Submission**:
 Evidence that a Provider accepted a Send Attempt, including common identifiers and optional Provider Metadata. It is not evidence that the SMS reached the Recipient.
