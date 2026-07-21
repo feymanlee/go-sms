@@ -22,6 +22,7 @@
 ```text
 github.com/feymanlee/go-sms
 ├── package sms
+├── failure
 └── provider
     ├── aliyun
     ├── qiniu
@@ -30,7 +31,7 @@ github.com/feymanlee/go-sms
     └── yunpian
 ```
 
-根包定义请求、结果、错误和 `Sender` 接口。每个 Provider 子包包含强类型配置、构造函数、参数转换、底层客户端和错误映射。五个子包与根包使用同一版本发布。未导入的 Provider 包不会进入调用方二进制，但五家 SDK 依赖仍会出现在 module 依赖图中。
+根包定义请求、结果和 `Sender` 接口；`failure` 包定义跨 Provider 的安全 Send Failure 契约。每个 Provider 子包包含强类型配置、构造函数、参数转换、底层客户端和错误映射。五个子包与根包使用同一版本发布。未导入的 Provider 包不会进入调用方二进制，但五家 SDK 依赖仍会出现在 module 依赖图中。
 
 ## 公共 API
 
@@ -98,7 +99,7 @@ Provider 构造失败用于固定配置错误；发送级输入错误通过 `Sen
 3. 把 E.164 Recipient 转换为目标 API 要求的格式。不支持该国家或地区时返回 `InvalidRequest`，不切换发送 API 或 Provider。
 4. 将参数按目标 API 编码。位置型 API 只读取切片顺序，命名型 API 按名称生成对象或表单值。
 5. 使用能接受 `context.Context` 且已关闭重试的官方 SDK 方法，或执行一次直接 HTTP 请求。
-6. 只有 Provider 明确返回受理状态时才构造 `Submission`；HTTP 200 中的业务拒绝仍转换为 `SendError`。
+6. 只有 Provider 明确返回受理状态时才构造 `Submission`；HTTP 200 中的业务拒绝仍转换为 `failure.Failure`。
 
 如果 Context 在请求开始后取消、截止时间到期或连接中断，且无法证明 Provider 未受理，则返回 `UnknownOutcome`。适配器不得为了等待底层 SDK 而启动无法取消的后台 goroutine。
 
@@ -118,33 +119,56 @@ Provider 构造失败用于固定配置错误；发送级输入错误通过 `Sen
 
 ## 错误模型
 
-`SendError` 包含以下字段：稳定类别、Provider、原生 Code、原生 Message、RequestID 和底层 Cause。它实现 `error` 与 `Unwrap`，并支持通过 `errors.Is` 判断稳定类别、通过 `errors.As` 获取完整信息。
+`failure` 包定义 Send Failure。它只描述请求已经跨过 Provider seam 后的不成功或不确定 Send Attempt；普通 `error` 返回仍是 `Sender.Send` 的完整错误契约。调用方通过 `failure.From(err)` 识别 Failure，而不是通过类别 sentinel、`SendError` 或 Provider 原生错误类型。
 
-稳定类别为：
+```go
+type Category string
 
-- `InvalidRequest`：公共校验或 Provider 特有请求校验失败
-- `Authentication`：凭证、权限或 API 请求签名失败
-- `RateLimited`：Provider 明确报告限流或频控
-- `Rejected`：模板、SignatureRef、号码或其他业务规则拒绝
-- `Unavailable`：Provider 明确报告暂时不可用
-- `UnknownOutcome`：超时、取消或连接中断后无法确认是否受理
-- `Internal`：响应无法解析或违反适配器预期
+const (
+    Authentication Category = "authentication"
+    RateLimited    Category = "rate_limited"
+    Rejected       Category = "rejected"
+    Unavailable    Category = "unavailable"
+    UnknownOutcome Category = "unknown_outcome"
+)
 
-外部请求开始后的取消和超时在归类为 `UnknownOutcome` 的同时，仍须支持 `errors.Is(err, context.Canceled)` 或 `errors.Is(err, context.DeadlineExceeded)`。错误模型不提供 `Retryable` 布尔值；是否重试由调用方结合业务幂等性决定。
+type Details struct { Provider, Code, RequestID string }
+type Diagnostic struct { Code, RequestID string }
 
-每个适配器只映射已确认的原生错误码。无法可靠分类的原生错误落入保守类别并保留原始诊断，不臆测其可重试性。
+type Failure interface {
+    error
+    Category() Category
+    Details() Details
+    UnknownOutcome() bool
+}
+
+func From(error) (Failure, bool)
+
+type Factory struct { /* unexported fields */ }
+func NewFactory(provider string) (Factory, error)
+func (Factory) Decision(Category, Diagnostic) Failure
+func (Factory) Unknown(Diagnostic, error) Failure
+```
+
+稳定类别严格只有 `authentication`、`rate_limited`、`rejected`、`unavailable` 和 `unknown_outcome`。前四项只用于 Provider 给出明确决定时：分别表示凭证或权限失败、限流、业务规则拒绝和明确暂时不可用。`UnknownOutcome` 表示请求调用后没有明确 Provider 决定，包括超时、取消、连接中断、无法解析的响应或适配器无法可靠分类的结果；它没有 Failure 级 `internal` 类别。
+
+公共校验、已完成的 Context、Provider 特有的 preflight 拒绝、请求编码和请求构造错误都发生在 Provider seam 之前，保持普通错误且 `failure.From` 返回 false。Provider 的明确决定优先于同时发生的 Context 取消；调用开始后，任何没有明确决定的结果都必须是 `UnknownOutcome`。
+
+每个 Provider 在构造时以稳定 Provider 名称创建一个 `failure.Factory`，并在本地把原生状态或错误码映射到 `Decision`。`Decision` 的无效类别安全降级为 `UnknownOutcome`，工厂方法不 panic 且不返回第二个错误。Provider 名称、Code 和 RequestID 都必须是有界 ASCII token：无效的可选 Code 或 RequestID 被省略。Failure 的 `Error()` 只包含规范化 Provider 和类别；它不公开 Message、Cause、`Unwrap`、原生错误身份、Provider 原生类型、原始响应或任意事实包。
+
+只有 `UnknownOutcome` 在记录了相应 Context 事实时才匹配 `errors.Is(err, context.Canceled)` 或 `errors.Is(err, context.DeadlineExceeded)`；Failure 不保留其他 native cause identity。`Failure` 是 sealed interface，内置和第三方 Provider 只能经由公开的 Provider-bound `Factory` 构造它。错误模型不提供 `Retryable` 布尔值；是否重试由调用方结合业务幂等性决定。
 
 ## 安全与可观测性
 
 库不主动记录日志、发送指标或启动后台任务。应用可以用装饰器包装 `Sender` 实现自己的监控、审计和路由。
 
-错误文本与 Metadata 不包含凭证、完整请求体或完整手机号。Provider 原生错误消息在返回前必须检查是否回显敏感请求字段。测试失败输出同样使用脱敏值。
+Failure 的 `Error()`、Details 和 Metadata 不包含凭证、完整请求体、完整手机号、模板参数、Provider 原生错误消息或 native cause。Details 只保存通过 token 校验的 Provider、Code 和 RequestID；测试失败输出同样使用脱敏值。
 
 ## 测试与发布验收
 
 普通 CI 在 Go 1.25 和 1.26 上执行：
 
-- 根包单元测试：E.164 解析、零值、请求校验、SignatureRef 优先级、错误匹配
+- 根包与 failure 单元测试：E.164 解析、零值、请求校验、SignatureRef 优先级、Failure 分类、诊断校验和 Context 匹配
 - Provider 契约测试：一次调用只产生一次外部请求、Context 传播、字段映射、成功响应和错误映射
 - HTTP Provider 测试：使用 `httptest.Server` 验证方法、路径、鉴权头、编码和响应解析
 - SDK Provider 测试：在官方客户端外定义最小内部接口，使用 fake 验证调用，不在公共 API 暴露 SDK 类型
@@ -182,3 +206,4 @@ Provider 构造失败用于固定配置错误；发送级输入错误通过 `Sen
 - [ADR 0001](../../adr/0001-prefer-official-provider-sdks.md)：优先官方 SDK，必要时单家使用直接 HTTP。
 - [ADR 0002](../../adr/0002-use-a-single-go-module.md)：核心与五个内置 Provider 使用单 Go module。
 - [ADR 0003](../../adr/0003-keep-standard-http-proxy-discovery.md)：默认客户端保留 Go 标准 HTTP 代理发现。
+- [ADR 0004](../../adr/0004-normalize-send-failures.md)：以 sealed failure module 统一 Send Failure。

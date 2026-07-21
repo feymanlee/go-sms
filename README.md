@@ -19,11 +19,11 @@ package main
 
 import (
 	"context"
-	"errors"
 	"log"
 	"time"
 
 	sms "github.com/feymanlee/go-sms"
+	"github.com/feymanlee/go-sms/failure"
 	"github.com/feymanlee/go-sms/provider/tencent"
 )
 
@@ -58,12 +58,15 @@ func main() {
 			},
 		},
 	})
-	if errors.Is(err, sms.ErrUnknownOutcome) {
-		log.Print("send outcome is unknown")
-		return
-	}
 	if err != nil {
-		log.Print(err)
+		if got, ok := failure.From(err); ok {
+			details := got.Details()
+			log.Printf("SMS Send Attempt failed: category=%s provider=%s code=%s request_id=%s",
+				got.Category(), details.Provider, details.Code, details.RequestID)
+			if got.UnknownOutcome() {
+				log.Print("reconcile before retry")
+			}
+		}
 		return
 	}
 
@@ -107,12 +110,23 @@ policy.
 
 ## Error handling
 
-Use `errors.Is` with `ErrInvalidRequest`, `ErrAuthentication`,
-`ErrRateLimited`, `ErrRejected`, `ErrUnavailable`, `ErrUnknownOutcome`, and
-`ErrInternal`. Use `errors.As` with `*sms.SendError` when Provider code,
-request ID, or other structured diagnostic fields are needed. An
-`ErrUnknownOutcome` means the caller must not assume that the SMS was not
-accepted.
+Failures after a request crosses the Provider seam are classified by the
+public `failure` package. Use `failure.From(err)` to distinguish them from
+ordinary errors, then inspect the returned `failure.Failure` with `Category()`,
+`Details()`, and `UnknownOutcome()`. The five categories are
+`authentication`, `rate_limited`, `rejected`, `unavailable`, and
+`unknown_outcome`.
+
+Validation, an already-done Context, Provider-specific preflight rejection,
+request encoding, and request construction failures are ordinary errors; they
+do not satisfy `failure.From`. A Failure's `Error()` contains only its
+canonical Provider and category. `Details()` may expose validated Provider,
+Code, and RequestID values, but never Recipient, template parameter values,
+Provider messages, native errors, or request bodies.
+
+An `unknown_outcome` means the caller must not assume the Provider did not
+accept the Send Attempt. Reconcile before retrying according to the
+application's idempotency policy.
 
 ## Non-goals
 
