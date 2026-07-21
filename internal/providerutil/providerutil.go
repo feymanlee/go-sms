@@ -43,9 +43,19 @@ func UnknownOutcome(provider string, recipient sms.Recipient, cause error) error
 		Kind:     sms.KindUnknownOutcome,
 		Provider: provider,
 		Message:  Sanitize(cause.Error(), recipient),
-		Cause:    cause,
+		Cause:    sanitizedCause{message: Sanitize(cause.Error(), recipient), cause: cause},
 	}
 }
+
+// sanitizedCause preserves errors.Is behavior without exposing the original error chain.
+type sanitizedCause struct {
+	message string
+	cause   error
+}
+
+func (e sanitizedCause) Error() string { return e.message }
+
+func (e sanitizedCause) Is(target error) bool { return errors.Is(e.cause, target) }
 
 // Sanitize replaces the recipient's E.164 and national forms in a message.
 func Sanitize(message string, recipient sms.Recipient) string {

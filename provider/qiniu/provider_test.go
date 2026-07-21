@@ -2,6 +2,9 @@ package qiniu
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha1"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -24,8 +27,12 @@ func TestSendPostsSignedQiniuJSON(t *testing.T) {
 		if got := r.Header.Get("Content-Type"); got != "application/json" {
 			t.Errorf("Content-Type = %q", got)
 		}
-		if got := r.Header.Get("Authorization"); !strings.HasPrefix(got, "Qiniu access-key:") {
-			t.Errorf("Authorization = %q", got)
+		payload, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := r.Header.Get("Authorization"), expectedAuthorization(r, "access-key", "secret-key", payload); got != want {
+			t.Errorf("Authorization = %q, want %q", got, want)
 		}
 		var body struct {
 			SignatureID string            `json:"signature_id"`
@@ -33,7 +40,7 @@ func TestSendPostsSignedQiniuJSON(t *testing.T) {
 			Mobiles     []string          `json:"mobiles"`
 			Parameters  map[string]string `json:"parameters"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := json.Unmarshal(payload, &body); err != nil {
 			t.Fatal(err)
 		}
 		if body.SignatureID != "sig-1" || body.TemplateID != "template-1" {
@@ -191,6 +198,40 @@ func TestSendReturnsUnknownOutcomeAfterTransportError(t *testing.T) {
 	}
 }
 
+func TestSendDoesNotCallTransportForCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var calls atomic.Int32
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return nil, errors.New("unexpected")
+	})}
+
+	_, err := testProvider(t, client, "https://example.invalid/v1/message").Send(ctx, testRequest(t))
+	if !errors.Is(err, context.Canceled) || calls.Load() != 0 {
+		t.Fatalf("error = %v, calls = %d", err, calls.Load())
+	}
+}
+
+func TestSendDoesNotExposeSecretTransportError(t *testing.T) {
+	raw := &secretQiniuTransportError{recipient: "+8613812345678"}
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, raw
+	})}
+
+	_, err := testProvider(t, client, "https://example.invalid/v1/message").Send(context.Background(), testRequest(t))
+	if !errors.Is(err, raw) || strings.Contains(err.Error(), raw.recipient) {
+		t.Fatalf("error = %v", err)
+	}
+	var recovered *secretQiniuTransportError
+	if errors.As(err, &recovered) {
+		t.Fatalf("raw transport error leaked through error chain: %#v", recovered)
+	}
+	if unwrap := errors.Unwrap(err); unwrap == nil || unwrap == raw || !strings.Contains(unwrap.Error(), "connection reset for [recipient]") || errors.Unwrap(unwrap) != nil || strings.Contains(unwrap.Error(), raw.recipient) {
+		t.Fatalf("unwrap = %#v", unwrap)
+	}
+}
+
 func TestNewValidatesCredentials(t *testing.T) {
 	for _, config := range []Config{
 		{SecretKey: "secret-key"},
@@ -229,3 +270,28 @@ func testRequest(t *testing.T) sms.Request {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func expectedAuthorization(req *http.Request, accessKey, secretKey string, body []byte) string {
+	host := req.Host
+	canonical := req.Method + " " + req.URL.EscapedPath()
+	if req.URL.RawQuery != "" {
+		canonical += "?" + req.URL.RawQuery
+	}
+	canonical += "\nHost: " + host
+	if contentType := req.Header.Get("Content-Type"); contentType != "" {
+		canonical += "\nContent-Type: " + contentType
+	}
+	canonical += "\n\n" + string(body)
+
+	mac := hmac.New(sha1.New, []byte(secretKey))
+	_, _ = mac.Write([]byte(canonical))
+	return "Qiniu " + accessKey + ":" + base64.URLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+type secretQiniuTransportError struct {
+	recipient string
+}
+
+func (e *secretQiniuTransportError) Error() string {
+	return "connection reset for " + e.recipient
+}

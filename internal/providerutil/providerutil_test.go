@@ -3,6 +3,7 @@ package providerutil
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,4 +57,33 @@ func TestNewHTTPClientTimeout(t *testing.T) {
 	if NewHTTPClient().Timeout != 10*time.Second {
 		t.Fatalf("timeout=%s", NewHTTPClient().Timeout)
 	}
+}
+
+func TestUnknownOutcomeSanitizesUnwrappedCauseWithoutLosingIsMatchability(t *testing.T) {
+	req := request(t, "+8613812345678")
+	raw := &secretTransportError{recipient: req.Recipient.String()}
+	err := UnknownOutcome("fake", req.Recipient, raw)
+
+	if !errors.Is(err, sms.ErrUnknownOutcome) || !errors.Is(err, raw) {
+		t.Fatalf("error does not preserve sentinel or raw identity: %v", err)
+	}
+	if strings.Contains(err.Error(), raw.recipient) {
+		t.Fatalf("Error leaked recipient: %q", err)
+	}
+	var recovered *secretTransportError
+	if errors.As(err, &recovered) {
+		t.Fatalf("raw transport error leaked through error chain: %#v", recovered)
+	}
+	unwrap := errors.Unwrap(err)
+	if unwrap == nil || unwrap == raw || unwrap.Error() != "transport failed for [recipient]" || errors.Unwrap(unwrap) != nil || strings.Contains(unwrap.Error(), raw.recipient) {
+		t.Fatalf("unwrap = %#v", unwrap)
+	}
+}
+
+type secretTransportError struct {
+	recipient string
+}
+
+func (e *secretTransportError) Error() string {
+	return "transport failed for " + e.recipient
 }
