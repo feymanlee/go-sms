@@ -13,7 +13,7 @@
 - Module path is exactly `github.com/feymanlee/go-sms`; minimum Go version is exactly 1.25.
 - A `Send` call targets exactly one E.164 Recipient through exactly one Provider and performs no automatic retry or failover.
 - Version 1 supports only Provider-native template IDs, ordered named template parameters, and one Recipient.
-- Credentials are constructor inputs; production library code never reads environment variables or configuration files.
+- Credentials and Provider business settings are constructor inputs; production library code never resolves them from environment variables or configuration files. Go's standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` transport discovery remains allowed.
 - Provider instances are immutable after construction and safe for concurrent `Send` calls.
 - `context.Context` cancellation and deadlines reach the outbound call; an already-done Context creates no request.
 - SDK types and raw responses never appear in the root public API. Credentials, complete request bodies, and complete phone numbers never appear in default error text, Metadata, or logs.

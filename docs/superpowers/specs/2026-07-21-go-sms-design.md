@@ -12,7 +12,7 @@
 - 一次 `Send` 调用等于一次且仅一次外部发送尝试。
 - Provider 原生类型不得泄漏到根包的公共 API。
 - 取消、截止时间和结果不确定性必须显式表达。
-- 配置和凭证由宿主应用显式注入；库不读取环境变量、文件或全局状态。
+- Provider 业务配置和凭证由宿主应用显式注入；库不从环境变量、文件或全局状态解析这些值。Go 标准的 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY` 传输代理发现仍然可用。
 - Provider 实例构造后不可变，并可被多个 goroutine 并发使用。
 
 ## Module 与包结构
@@ -86,6 +86,8 @@ type Submission struct {
 | 云片 | API Key |
 
 每个子包公开 `New(Config, ...Option) (*Provider, error)`。构造选项允许注入 `http.Client` 和自定义 API endpoint，供企业代理、私有网络和测试使用。未注入时使用总超时 10 秒的独立客户端；调用方可用更短的 Context deadline，也可通过注入客户端改变默认值。库不修改 `http.DefaultClient`。凭证来源、轮换和多账号选择由宿主应用负责，多账号通过多个 Provider 实例表示。
+
+默认客户端遵循 Go 的标准代理环境约定。这属于 HTTP 传输策略，不是 Provider 凭证或业务配置；需要完全确定性或不同代理策略的宿主应用可以注入自己的 `http.Client`。
 
 Provider 构造失败用于固定配置错误；发送级输入错误通过 `Send` 返回 `InvalidRequest`。
 
@@ -179,3 +181,4 @@ Provider 构造失败用于固定配置错误；发送级输入错误通过 `Sen
 
 - [ADR 0001](../../adr/0001-prefer-official-provider-sdks.md)：优先官方 SDK，必要时单家使用直接 HTTP。
 - [ADR 0002](../../adr/0002-use-a-single-go-module.md)：核心与五个内置 Provider 使用单 Go module。
+- [ADR 0003](../../adr/0003-keep-standard-http-proxy-discovery.md)：默认客户端保留 Go 标准 HTTP 代理发现。
