@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	sms "github.com/feymanlee/go-sms"
+	"github.com/feymanlee/go-sms/failure"
 	"github.com/feymanlee/go-sms/internal/providerutil"
 	tccommon "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
@@ -23,6 +24,7 @@ type Provider struct {
 	client           apiClient
 	appID            string
 	defaultSignature string
+	failures         failure.Factory
 }
 
 var _ sms.Sender = (*Provider)(nil)
@@ -42,6 +44,10 @@ func New(config Config, opts ...Option) (*Provider, error) {
 	}
 	if tccommon.DefaultHttpClient != nil {
 		return nil, errors.New("tencent: tccommon.DefaultHttpClient must be nil; use WithHTTPClient for provider-specific HTTP configuration")
+	}
+	failures, err := failure.NewFactory("tencent")
+	if err != nil {
+		return nil, err
 	}
 
 	settings := options{}
@@ -67,6 +73,7 @@ func New(config Config, opts ...Option) (*Provider, error) {
 		client:           sdkClient,
 		appID:            config.SMSAppID,
 		defaultSignature: config.DefaultSignatureRef,
+		failures:         failures,
 	}, nil
 }
 
@@ -114,26 +121,20 @@ func (p *Provider) Send(ctx context.Context, req sms.Request) (sms.Submission, e
 
 	response, err := p.client.SendSmsWithContext(ctx, request)
 	if err != nil {
-		return sms.Submission{}, classifyError(ctx, err, req.Recipient)
+		return sms.Submission{}, classifyError(ctx, p.failures, err)
 	}
 	requestID := ""
 	if response != nil && response.Response != nil {
 		requestID = stringValue(response.Response.RequestId)
 	}
 	if response == nil || response.Response == nil || len(response.Response.SendStatusSet) != 1 || response.Response.SendStatusSet[0] == nil || stringValue(response.Response.SendStatusSet[0].Code) == "" {
-		return sms.Submission{}, internalError("malformed response", requestID, nil)
+		return sms.Submission{}, p.failures.Unknown(failure.Diagnostic{RequestID: requestID}, ctx.Err())
 	}
 
 	status := response.Response.SendStatusSet[0]
 	code := stringValue(status.Code)
 	if code != "Ok" {
-		return sms.Submission{}, &sms.SendError{
-			Kind:      classifyStatusCode(code),
-			Provider:  "tencent",
-			Code:      code,
-			Message:   providerErrorMessage,
-			RequestID: requestID,
-		}
+		return sms.Submission{}, p.failures.Decision(classifyStatusCode(code), failure.Diagnostic{Code: code, RequestID: requestID})
 	}
 	var metadata map[string]string
 	if status.Fee != nil {

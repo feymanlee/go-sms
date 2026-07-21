@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	sms "github.com/feymanlee/go-sms"
+	"github.com/feymanlee/go-sms/failure"
 	tccommon "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
 	tcerr "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/errors"
 	tc "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/sms/v20210111"
@@ -31,6 +31,12 @@ func (f *fakeClient) SendSmsWithContext(_ context.Context, req *tc.SendSmsReques
 	f.calls++
 	f.req = req
 	return f.response, f.err
+}
+
+type apiClientFunc func(context.Context, *tc.SendSmsRequest) (*tc.SendSmsResponse, error)
+
+func (f apiClientFunc) SendSmsWithContext(ctx context.Context, req *tc.SendSmsRequest) (*tc.SendSmsResponse, error) {
+	return f(ctx, req)
 }
 
 func testRequest(t *testing.T) sms.Request {
@@ -68,7 +74,8 @@ func response(code, message, serialNo string, fee uint64, requestID string) *tc.
 
 func TestSendMapsRequestAndReturnsSubmission(t *testing.T) {
 	fake := &fakeClient{response: response("Ok", "send success", "serial-1", 1, "request-1")}
-	provider := &Provider{client: fake, appID: "1400000000", defaultSignature: "Default"}
+	provider := newTestProvider(t, fake)
+	provider.defaultSignature = "Default"
 
 	submission, err := provider.Send(context.Background(), testRequest(t))
 	if err != nil {
@@ -102,7 +109,8 @@ func TestSendMapsRequestAndReturnsSubmission(t *testing.T) {
 
 func TestSendUsesDefaultSignature(t *testing.T) {
 	fake := &fakeClient{response: response("Ok", "send success", "serial-1", 1, "request-1")}
-	provider := &Provider{client: fake, appID: "1400000000", defaultSignature: "Default"}
+	provider := newTestProvider(t, fake)
+	provider.defaultSignature = "Default"
 	req := testRequest(t)
 	req.SignatureRef = ""
 
@@ -116,25 +124,36 @@ func TestSendUsesDefaultSignature(t *testing.T) {
 
 func TestSendRejectsNonOKStatus(t *testing.T) {
 	fake := &fakeClient{response: response("FailedOperation.TemplateIncorrectOrUnapproved", "bad template", "", 0, "request-2")}
-	provider := &Provider{client: fake, appID: "1400000000"}
+	provider := newTestProvider(t, fake)
 
 	_, err := provider.Send(context.Background(), testRequest(t))
-	if !errors.Is(err, sms.ErrRejected) {
-		t.Fatalf("error = %v", err)
-	}
-	var detail *sms.SendError
-	if !errors.As(err, &detail) || detail.Code != "FailedOperation.TemplateIncorrectOrUnapproved" || detail.RequestID != "request-2" || detail.Message != "tencent provider request failed" {
-		t.Fatalf("detail = %#v", detail)
+	got := requireFailure(t, err, failure.Rejected)
+	if details := got.Details(); details.Code != "FailedOperation.TemplateIncorrectOrUnapproved" || details.RequestID != "request-2" {
+		t.Fatalf("details = %#v", details)
 	}
 }
 
 func TestSendClassifiesKnownStatusCode(t *testing.T) {
-	fake := &fakeClient{response: response("LimitExceeded.PhoneNumberThirtySecondLimit", "too frequent", "", 0, "request-2")}
-	provider := &Provider{client: fake, appID: "1400000000"}
+	tests := []struct {
+		code     string
+		category failure.Category
+	}{
+		{code: "AuthFailure.SecretIdNotFound", category: failure.Authentication},
+		{code: "RequestLimitExceeded", category: failure.RateLimited},
+		{code: "InternalError", category: failure.Unavailable},
+		{code: "FailedOperation.TemplateIncorrectOrUnapproved", category: failure.Rejected},
+		{code: "UnsupportedOperation", category: failure.Rejected},
+	}
+	for _, tt := range tests {
+		t.Run(tt.code, func(t *testing.T) {
+			provider := newTestProvider(t, &fakeClient{response: response(tt.code, "untrusted", "", 0, "request-2")})
 
-	_, err := provider.Send(context.Background(), testRequest(t))
-	if !errors.Is(err, sms.ErrRateLimited) {
-		t.Fatalf("error = %v", err)
+			_, err := provider.Send(context.Background(), testRequest(t))
+			got := requireFailure(t, err, tt.category)
+			if details := got.Details(); details.Code != tt.code || details.RequestID != "request-2" {
+				t.Fatalf("details = %#v", details)
+			}
+		})
 	}
 }
 
@@ -145,16 +164,18 @@ func TestSendClassifiesTransportErrorsAsUnknownOutcome(t *testing.T) {
 	}{
 		{name: "context canceled", err: context.Canceled},
 		{name: "deadline", err: context.DeadlineExceeded},
-		{name: "network", err: &net.DNSError{Err: "timeout", IsTimeout: true}},
 		{name: "URL", err: &url.Error{Op: "Post", URL: "https://sms.tencentcloudapi.com", Err: errors.New("connection reset")}},
+		{name: "ordinary", err: errors.New("SDK failed")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fake := &fakeClient{err: tt.err}
-			provider := &Provider{client: fake, appID: "1400000000"}
+			provider := newTestProvider(t, fake)
 			_, err := provider.Send(context.Background(), testRequest(t))
-			if !errors.Is(err, sms.ErrUnknownOutcome) || !errors.Is(err, tt.err) {
-				t.Fatalf("error = %v", err)
+			requireFailure(t, err, failure.UnknownOutcome)
+			isContext := tt.err == context.Canceled || tt.err == context.DeadlineExceeded
+			if isContext != errors.Is(err, tt.err) {
+				t.Fatalf("context match for %v = %t", tt.err, errors.Is(err, tt.err))
 			}
 		})
 	}
@@ -176,19 +197,13 @@ func TestSDKTransportCancellationIsUnknownOutcome(t *testing.T) {
 	}
 
 	_, err = provider.Send(ctx, testRequest(t))
-	if !errors.Is(err, sms.ErrUnknownOutcome) || !errors.Is(err, context.Canceled) {
-		t.Fatalf("error = %v", err)
-	}
-	var detail *sms.SendError
+	got := requireFailure(t, err, failure.UnknownOutcome)
 	var native *tcerr.TencentCloudSDKError
-	if !errors.As(err, &detail) || detail.Code != "ClientError.NetworkError" {
-		t.Fatalf("detail = %#v", detail)
+	if details := got.Details(); details.Provider != "tencent" || details.Code != "ClientError.NetworkError" {
+		t.Fatalf("details = %#v", details)
 	}
-	if errors.As(err, &native) {
+	if !errors.Is(err, context.Canceled) || errors.As(err, &native) {
 		t.Fatalf("raw SDK error leaked through error chain: %#v", native)
-	}
-	if !errors.Is(err, context.Canceled) || errors.Unwrap(detail.Cause) != nil {
-		t.Fatalf("cause = %v", detail.Cause)
 	}
 }
 
@@ -205,15 +220,12 @@ func TestSDKNetworkErrorIsUnknownOutcome(t *testing.T) {
 	}
 
 	_, err = provider.Send(context.Background(), testRequest(t))
-	if !errors.Is(err, sms.ErrUnknownOutcome) {
-		t.Fatalf("error = %v", err)
-	}
-	var detail *sms.SendError
+	got := requireFailure(t, err, failure.UnknownOutcome)
 	var native *tcerr.TencentCloudSDKError
-	if !errors.As(err, &detail) || detail.Code != "ClientError.NetworkError" {
-		t.Fatalf("detail = %#v", detail)
+	if details := got.Details(); details.Provider != "tencent" || details.Code != "ClientError.NetworkError" {
+		t.Fatalf("details = %#v", details)
 	}
-	if errors.As(err, &native) || errors.Unwrap(detail.Cause) != nil {
+	if errors.As(err, &native) {
 		t.Fatalf("native error leaked: %#v", native)
 	}
 }
@@ -259,147 +271,135 @@ func TestSendPreservesSDKNetworkErrorDetails(t *testing.T) {
 		"failed for +8613812345678, +12025550123, Authorization: Bearer secret-token, {\"message\":\"private response body\"}",
 		"request-network",
 	)
-	provider := &Provider{client: &fakeClient{err: native}, appID: "1400000000"}
+	provider := newTestProvider(t, &fakeClient{err: native})
 
 	_, err := provider.Send(context.Background(), testRequest(t))
-	var detail *sms.SendError
-	if !errors.As(err, &detail) {
-		t.Fatalf("error = %v", err)
-	}
-	if detail.Kind != sms.KindUnknownOutcome || detail.Code != "ClientError.NetworkError" || detail.RequestID != "request-network" {
-		t.Fatalf("detail = %#v", detail)
+	got := requireFailure(t, err, failure.UnknownOutcome)
+	if details := got.Details(); details.Code != "ClientError.NetworkError" || details.RequestID != "request-network" {
+		t.Fatalf("details = %#v", details)
 	}
 	for _, secret := range []string{"+8613812345678", "+12025550123", "Authorization: Bearer secret-token", `{\"message\":\"private response body\"}`} {
-		if strings.Contains(err.Error(), secret) || strings.Contains(detail.Message, secret) || strings.Contains(errors.Unwrap(err).Error(), secret) {
-			t.Fatalf("public error text leaked %q: error=%q message=%q cause=%q", secret, err, detail.Message, errors.Unwrap(err))
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("public error text leaked %q: error=%q", secret, err)
 		}
 	}
-	if !errors.Is(err, native) {
-		t.Fatalf("error does not preserve native identity: %v", err)
-	}
 	var recovered *tcerr.TencentCloudSDKError
-	if errors.As(err, &recovered) {
+	if errors.Is(err, native) || errors.As(err, &recovered) {
 		t.Fatalf("raw SDK error leaked through error chain: %#v", recovered)
-	}
-	if detail.Cause == native || errors.Unwrap(detail.Cause) != nil {
-		t.Fatalf("cause = %#v", detail.Cause)
 	}
 }
 
 func TestSendDoesNotExposeUntrustedProviderMessages(t *testing.T) {
 	remoteMessage, secrets := adversarialRemoteMessage(testRequest(t), "secret-key")
-	provider := &Provider{
-		client: &fakeClient{response: response(
-			"FailedOperation.TemplateIncorrectOrUnapproved",
-			remoteMessage,
-			"",
-			0,
-			"request-adversarial",
-		)},
-		appID: "1400000000",
-	}
+	provider := newTestProvider(t, &fakeClient{response: response(
+		"FailedOperation.TemplateIncorrectOrUnapproved",
+		remoteMessage,
+		"",
+		0,
+		"request-adversarial",
+	)})
 
 	_, err := provider.Send(context.Background(), testRequest(t))
-	var detail *sms.SendError
-	if !errors.Is(err, sms.ErrRejected) || !errors.As(err, &detail) {
-		t.Fatalf("error = %v, detail = %#v", err, detail)
+	got := requireFailure(t, err, failure.Rejected)
+	if details := got.Details(); details.Code != "FailedOperation.TemplateIncorrectOrUnapproved" || details.RequestID != "request-adversarial" {
+		t.Fatalf("details = %#v", details)
 	}
-	if detail.Code != "FailedOperation.TemplateIncorrectOrUnapproved" || detail.RequestID != "request-adversarial" || detail.Message != "tencent provider request failed" {
-		t.Fatalf("detail = %#v", detail)
-	}
-	assertNoSensitiveText(t, secrets, err.Error(), detail.Message)
+	assertNoSensitiveText(t, secrets, err.Error())
 }
 
-func TestSendKeepsNativeSDKCauseOpaqueAndMatchable(t *testing.T) {
+func TestSendDoesNotExposeNativeSDKError(t *testing.T) {
 	remoteMessage, secrets := adversarialRemoteMessage(testRequest(t), "secret-key")
 	native := tcerr.NewTencentCloudSDKError("AuthFailure.SecretIdNotFound", remoteMessage, "request-native")
-	provider := &Provider{client: &fakeClient{err: native}, appID: "1400000000"}
+	provider := newTestProvider(t, &fakeClient{err: native})
 
 	_, err := provider.Send(context.Background(), testRequest(t))
-	var detail *sms.SendError
-	if !errors.Is(err, sms.ErrAuthentication) || !errors.Is(err, native) || !errors.As(err, &detail) {
-		t.Fatalf("error = %v, detail = %#v", err, detail)
-	}
-	if detail.Code != "AuthFailure.SecretIdNotFound" || detail.RequestID != "request-native" || detail.Message != "tencent SDK request failed" {
-		t.Fatalf("detail = %#v", detail)
+	got := requireFailure(t, err, failure.Authentication)
+	if details := got.Details(); details.Code != "AuthFailure.SecretIdNotFound" || details.RequestID != "request-native" {
+		t.Fatalf("details = %#v", details)
 	}
 	var recovered *tcerr.TencentCloudSDKError
-	if errors.As(err, &recovered) {
+	if errors.Is(err, native) || errors.As(err, &recovered) {
 		t.Fatalf("raw SDK error leaked through errors.As: %#v", recovered)
 	}
-	if detail.Cause == nil || errors.Unwrap(detail.Cause) != nil {
-		t.Fatalf("cause = %#v", detail.Cause)
-	}
-	assertNoSensitiveText(t, secrets, err.Error(), detail.Message, detail.Cause.Error(), errors.Unwrap(err).Error())
+	assertNoSensitiveText(t, secrets, err.Error())
 }
 
-func TestSendKeepsUnmatchedSDKCauseOpaqueAndMatchable(t *testing.T) {
+func TestSendDoesNotExposeUnmatchedSDKError(t *testing.T) {
 	remoteMessage, secrets := adversarialRemoteMessage(testRequest(t), "secret-key")
 	native := &sensitiveSDKError{message: remoteMessage}
-	provider := &Provider{client: &fakeClient{err: native}, appID: "1400000000"}
+	provider := newTestProvider(t, &fakeClient{err: native})
 
 	_, err := provider.Send(context.Background(), testRequest(t))
-	var detail *sms.SendError
-	if !errors.Is(err, sms.ErrInternal) || !errors.Is(err, native) || !errors.As(err, &detail) {
-		t.Fatalf("error = %v, detail = %#v", err, detail)
-	}
-	if detail.Message != "tencent SDK request failed" {
-		t.Fatalf("detail = %#v", detail)
-	}
+	requireFailure(t, err, failure.UnknownOutcome)
 	var recovered *sensitiveSDKError
-	if errors.As(err, &recovered) {
+	if errors.Is(err, native) || errors.As(err, &recovered) {
 		t.Fatalf("raw SDK error leaked through errors.As: %#v", recovered)
 	}
-	if detail.Cause == nil || errors.Unwrap(detail.Cause) != nil {
-		t.Fatalf("cause = %#v", detail.Cause)
-	}
-	assertNoSensitiveText(t, secrets, err.Error(), detail.Message, detail.Cause.Error(), errors.Unwrap(err).Error())
+	assertNoSensitiveText(t, secrets, err.Error())
 }
 
 func TestSendClassifiesNativeErrors(t *testing.T) {
 	tests := []struct {
-		code string
-		want error
+		code     string
+		category failure.Category
 	}{
-		{code: "AuthFailure.SecretIdNotFound", want: sms.ErrAuthentication},
-		{code: "InvalidCredential", want: sms.ErrAuthentication},
-		{code: "InvalidCredential.Expired", want: sms.ErrAuthentication},
-		{code: "UnauthorizedOperation.RequestPermissionDeny", want: sms.ErrAuthentication},
-		{code: "RequestLimitExceeded", want: sms.ErrRateLimited},
-		{code: "RequestLimitExceeded.Global", want: sms.ErrRateLimited},
-		{code: "LimitExceeded.PhoneNumberDailyLimit", want: sms.ErrRateLimited},
-		{code: "InternalError", want: sms.ErrUnavailable},
-		{code: "InternalErrorUnexpected", want: sms.ErrUnavailable},
-		{code: "ResourceUnavailable.ServiceBusy", want: sms.ErrUnavailable},
-		{code: "UnsupportedOperation", want: sms.ErrInternal},
+		{code: "AuthFailure.SecretIdNotFound", category: failure.Authentication},
+		{code: "InvalidCredential", category: failure.Authentication},
+		{code: "InvalidCredential.Expired", category: failure.Authentication},
+		{code: "UnauthorizedOperation.RequestPermissionDeny", category: failure.Authentication},
+		{code: "RequestLimitExceeded", category: failure.RateLimited},
+		{code: "RequestLimitExceeded.Global", category: failure.RateLimited},
+		{code: "LimitExceeded.PhoneNumberDailyLimit", category: failure.RateLimited},
+		{code: "InternalError", category: failure.Unavailable},
+		{code: "InternalErrorUnexpected", category: failure.Unavailable},
+		{code: "ResourceUnavailable.ServiceBusy", category: failure.Unavailable},
+		{code: "ClientError.NetworkError", category: failure.UnknownOutcome},
+		{code: "UnsupportedOperation", category: failure.UnknownOutcome},
 	}
 	for _, tt := range tests {
 		t.Run(tt.code, func(t *testing.T) {
 			native := tcerr.NewTencentCloudSDKError(tt.code, "failed for +8613812345678", "request-3")
 			fake := &fakeClient{err: native}
-			provider := &Provider{client: fake, appID: "1400000000"}
+			provider := newTestProvider(t, fake)
 
 			_, err := provider.Send(context.Background(), testRequest(t))
-			if !errors.Is(err, tt.want) {
-				t.Fatalf("error = %v, want %v", err, tt.want)
+			got := requireFailure(t, err, tt.category)
+			if details := got.Details(); details.Code != tt.code || details.RequestID != "request-3" {
+				t.Fatalf("details = %#v", details)
 			}
-			var detail *sms.SendError
-			if !errors.As(err, &detail) || detail.Code != tt.code || detail.RequestID != "request-3" || strings.Contains(detail.Message, "13812345678") || !errors.Is(err, native) {
-				t.Fatalf("detail = %#v", detail)
+			var recovered *tcerr.TencentCloudSDKError
+			if errors.Is(err, native) || errors.As(err, &recovered) {
+				t.Fatalf("native error leaked: %#v", recovered)
 			}
 		})
 	}
 }
 
+func TestKnownSDKDecisionWinsOverCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	native := tcerr.NewTencentCloudSDKError("AuthFailure.SecretIdNotFound", "untrusted", "request-canceled")
+	provider := newTestProvider(t, apiClientFunc(func(context.Context, *tc.SendSmsRequest) (*tc.SendSmsResponse, error) {
+		cancel()
+		return nil, native
+	}))
+
+	_, err := provider.Send(ctx, testRequest(t))
+	got := requireFailure(t, err, failure.Authentication)
+	if details := got.Details(); details.Code != "AuthFailure.SecretIdNotFound" || details.RequestID != "request-canceled" {
+		t.Fatalf("details = %#v", details)
+	}
+	if errors.Is(err, context.Canceled) {
+		t.Fatalf("decision matched canceled Context: %v", err)
+	}
+}
+
 func TestSendSanitizesRejectedStatus(t *testing.T) {
 	fake := &fakeClient{response: response("FailedOperation", "failed for +8613812345678", "", 0, "request-4")}
-	provider := &Provider{client: fake, appID: "1400000000"}
+	provider := newTestProvider(t, fake)
 
 	_, err := provider.Send(context.Background(), testRequest(t))
-	var detail *sms.SendError
-	if !errors.As(err, &detail) || strings.Contains(detail.Message, "13812345678") {
-		t.Fatalf("detail = %#v", detail)
-	}
+	requireFailure(t, err, failure.Rejected)
+	assertNoSensitiveText(t, []string{"13812345678"}, err.Error())
 }
 
 type sensitiveSDKError struct {
@@ -430,7 +430,7 @@ func assertNoSensitiveText(t *testing.T, secrets []string, texts ...string) {
 	}
 }
 
-func TestSendRejectsMalformedResponses(t *testing.T) {
+func TestSendReturnsUnknownOutcomeForMalformedResponses(t *testing.T) {
 	tests := []struct {
 		name      string
 		response  *tc.SendSmsResponse
@@ -446,11 +446,11 @@ func TestSendRejectsMalformedResponses(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			provider := &Provider{client: &fakeClient{response: tt.response}, appID: "1400000000"}
+			provider := newTestProvider(t, &fakeClient{response: tt.response})
 			_, err := provider.Send(context.Background(), testRequest(t))
-			var detail *sms.SendError
-			if !errors.Is(err, sms.ErrInternal) || !errors.As(err, &detail) || detail.RequestID != tt.requestID {
-				t.Fatalf("error = %v, detail = %#v", err, detail)
+			got := requireFailure(t, err, failure.UnknownOutcome)
+			if details := got.Details(); details.RequestID != tt.requestID {
+				t.Fatalf("details = %#v", details)
 			}
 		})
 	}
@@ -459,7 +459,7 @@ func TestSendRejectsMalformedResponses(t *testing.T) {
 func TestSendOmitsFeeMetadataWhenFeeIsMissing(t *testing.T) {
 	accepted := response("Ok", "send success", "serial-1", 0, "request-1")
 	accepted.Response.SendStatusSet[0].Fee = nil
-	provider := &Provider{client: &fakeClient{response: accepted}, appID: "1400000000"}
+	provider := newTestProvider(t, &fakeClient{response: accepted})
 
 	submission, err := provider.Send(context.Background(), testRequest(t))
 	if err != nil {
@@ -472,7 +472,7 @@ func TestSendOmitsFeeMetadataWhenFeeIsMissing(t *testing.T) {
 
 func TestSendValidatesBeforeCallingClient(t *testing.T) {
 	fake := &fakeClient{}
-	provider := &Provider{client: fake, appID: "1400000000"}
+	provider := newTestProvider(t, fake)
 	req := testRequest(t)
 	req.SignatureRef = ""
 
@@ -533,6 +533,27 @@ func TestNewRejectsTencentGlobalHTTPClientWithoutMutation(t *testing.T) {
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func newTestProvider(t *testing.T, client apiClient) *Provider {
+	t.Helper()
+	failures, err := failure.NewFactory("tencent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &Provider{client: client, appID: "1400000000", failures: failures}
+}
+
+func requireFailure(t *testing.T, err error, category failure.Category) failure.Failure {
+	t.Helper()
+	got, ok := failure.From(err)
+	if !ok {
+		t.Fatalf("error is not a Failure: %v", err)
+	}
+	if got.Category() != category {
+		t.Fatalf("category=%q want=%q", got.Category(), category)
+	}
+	return got
+}
 
 func TestNewConfiguresSDKProfile(t *testing.T) {
 	var request *http.Request
