@@ -7,9 +7,11 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	sms "github.com/feymanlee/go-sms"
+	"github.com/feymanlee/go-sms/failure"
 	"github.com/feymanlee/go-sms/internal/providerutil"
 )
 
@@ -21,6 +23,7 @@ type Provider struct {
 	accessKey        string
 	secretKey        string
 	defaultSignature string
+	failures         failure.Factory
 }
 
 var _ sms.Sender = (*Provider)(nil)
@@ -31,6 +34,10 @@ func New(config Config, opts ...Option) (*Provider, error) {
 	}
 	if strings.TrimSpace(config.SecretKey) == "" {
 		return nil, errors.New("qiniu: SecretKey is required")
+	}
+	failures, err := failure.NewFactory("qiniu")
+	if err != nil {
+		return nil, err
 	}
 
 	settings := options{endpoint: defaultEndpoint}
@@ -56,6 +63,7 @@ func New(config Config, opts ...Option) (*Provider, error) {
 		accessKey:        config.AccessKey,
 		secretKey:        config.SecretKey,
 		defaultSignature: config.DefaultSignatureRef,
+		failures:         failures,
 	}, nil
 }
 
@@ -90,42 +98,40 @@ func (p *Provider) Send(ctx context.Context, req sms.Request) (sms.Submission, e
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
-		return sms.Submission{}, internalError("cannot encode request", "")
+		return sms.Submission{}, errors.New("qiniu: cannot encode request")
 	}
 
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint, bytes.NewReader(payload))
 	if err != nil {
-		return sms.Submission{}, internalError("cannot create request", "")
+		return sms.Submission{}, errors.New("qiniu: cannot create request")
 	}
 	httpRequest.Header.Set("Content-Type", "application/json")
 	httpRequest.Header.Set("Authorization", authorization(httpRequest, p.accessKey, p.secretKey, payload))
 
 	response, err := p.client.Do(httpRequest)
 	if err != nil {
-		cause := err
-		if contextErr := ctx.Err(); contextErr != nil && !errors.Is(err, contextErr) {
-			cause = errors.Join(err, contextErr)
-		}
-		return sms.Submission{}, providerutil.UnknownOutcome("qiniu", req.Recipient, cause)
+		return sms.Submission{}, p.failures.Unknown(failure.Diagnostic{}, errors.Join(err, ctx.Err()))
 	}
 	if response == nil {
-		return sms.Submission{}, internalError("malformed response", "")
+		return sms.Submission{}, p.failures.Unknown(failure.Diagnostic{}, ctx.Err())
 	}
 	defer response.Body.Close()
 
 	requestID := response.Header.Get("X-Reqid")
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return sms.Submission{}, providerError(response.StatusCode, requestID)
+		return sms.Submission{}, p.failures.Decision(httpErrorCategory(response.StatusCode), failure.Diagnostic{
+			Code: strconv.Itoa(response.StatusCode), RequestID: requestID,
+		})
 	}
 
 	var responseBody struct {
 		JobID string `json:"job_id"`
 	}
 	if err := decodeResponse(response.Body, &responseBody); err != nil {
-		return sms.Submission{}, internalError("cannot decode response", requestID)
+		return sms.Submission{}, p.failures.Unknown(failure.Diagnostic{RequestID: requestID}, ctx.Err())
 	}
 	if responseBody.JobID == "" {
-		return sms.Submission{}, internalError("malformed response", requestID)
+		return sms.Submission{}, p.failures.Unknown(failure.Diagnostic{RequestID: requestID}, ctx.Err())
 	}
 	return sms.Submission{Provider: "qiniu", MessageID: responseBody.JobID, RequestID: requestID}, nil
 }

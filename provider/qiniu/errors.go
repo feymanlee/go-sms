@@ -2,41 +2,19 @@ package qiniu
 
 import (
 	"net/http"
-	"strconv"
 
-	sms "github.com/feymanlee/go-sms"
+	"github.com/feymanlee/go-sms/failure"
 )
 
-const non2xxMessage = "qiniu request failed"
-
-func httpErrorKind(status int) sms.ErrorKind {
+func httpErrorCategory(status int) failure.Category {
 	switch {
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:
-		return sms.KindAuthentication
+		return failure.Authentication
 	case status == http.StatusTooManyRequests:
-		return sms.KindRateLimited
+		return failure.RateLimited
 	case status >= http.StatusInternalServerError && status <= 599:
-		return sms.KindUnavailable
+		return failure.Unavailable
 	default:
-		return sms.KindRejected
-	}
-}
-
-func providerError(status int, requestID string) error {
-	return &sms.SendError{
-		Kind:      httpErrorKind(status),
-		Provider:  "qiniu",
-		Code:      strconv.Itoa(status),
-		Message:   non2xxMessage,
-		RequestID: requestID,
-	}
-}
-
-func internalError(message, requestID string) error {
-	return &sms.SendError{
-		Kind:      sms.KindInternal,
-		Provider:  "qiniu",
-		Message:   message,
-		RequestID: requestID,
+		return failure.Rejected
 	}
 }

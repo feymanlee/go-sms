@@ -14,8 +14,10 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	sms "github.com/feymanlee/go-sms"
+	"github.com/feymanlee/go-sms/failure"
 )
 
 func TestSendPostsSignedQiniuJSON(t *testing.T) {
@@ -108,22 +110,23 @@ func TestSendDoesNotFollowRedirects(t *testing.T) {
 	defer server.Close()
 
 	_, err := testProvider(t, server.Client(), server.URL).Send(context.Background(), testRequest(t))
-	if !errors.Is(err, sms.ErrRejected) || redirects.Load() != 0 {
+	requireFailure(t, err, failure.Rejected)
+	if redirects.Load() != 0 {
 		t.Fatalf("error = %v, redirects = %d", err, redirects.Load())
 	}
 }
 
 func TestSendClassifiesHTTPResponsesAndCapturesRequestID(t *testing.T) {
 	tests := []struct {
-		name   string
-		status int
-		want   error
+		name     string
+		status   int
+		category failure.Category
 	}{
-		{name: "unauthorized", status: http.StatusUnauthorized, want: sms.ErrAuthentication},
-		{name: "forbidden", status: http.StatusForbidden, want: sms.ErrAuthentication},
-		{name: "rate limited", status: http.StatusTooManyRequests, want: sms.ErrRateLimited},
-		{name: "unavailable", status: http.StatusBadGateway, want: sms.ErrUnavailable},
-		{name: "rejected", status: http.StatusBadRequest, want: sms.ErrRejected},
+		{name: "unauthorized", status: http.StatusUnauthorized, category: failure.Authentication},
+		{name: "forbidden", status: http.StatusForbidden, category: failure.Authentication},
+		{name: "rate limited", status: http.StatusTooManyRequests, category: failure.RateLimited},
+		{name: "unavailable", status: http.StatusBadGateway, category: failure.Unavailable},
+		{name: "rejected", status: http.StatusBadRequest, category: failure.Rejected},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -135,9 +138,9 @@ func TestSendClassifiesHTTPResponsesAndCapturesRequestID(t *testing.T) {
 			defer server.Close()
 
 			_, err := testProvider(t, server.Client(), server.URL).Send(context.Background(), testRequest(t))
-			var detail *sms.SendError
-			if !errors.Is(err, tt.want) || !errors.As(err, &detail) || detail.Code != strconv.Itoa(tt.status) || detail.RequestID != "request-error" || detail.Message != non2xxMessage {
-				t.Fatalf("error = %v, detail = %#v", err, detail)
+			got := requireFailure(t, err, tt.category)
+			if details := got.Details(); details.Code != strconv.Itoa(tt.status) || details.RequestID != "request-error" {
+				t.Fatalf("details = %#v", details)
 			}
 		})
 	}
@@ -153,9 +156,9 @@ func TestSendDoesNotExposeRemoteErrorBody(t *testing.T) {
 	defer server.Close()
 
 	_, err := testProvider(t, server.Client(), server.URL).Send(context.Background(), testRequest(t))
-	var detail *sms.SendError
-	if !errors.Is(err, sms.ErrRejected) || !errors.As(err, &detail) || detail.Code != strconv.Itoa(http.StatusBadRequest) || detail.RequestID != "request-error" || detail.Message != non2xxMessage {
-		t.Fatalf("error = %v, detail = %#v", err, detail)
+	got := requireFailure(t, err, failure.Rejected)
+	if details := got.Details(); details.Code != strconv.Itoa(http.StatusBadRequest) || details.RequestID != "request-error" {
+		t.Fatalf("details = %#v", details)
 	}
 	for _, secret := range []string{
 		"+8613812345678",
@@ -163,8 +166,8 @@ func TestSendDoesNotExposeRemoteErrorBody(t *testing.T) {
 		"Authorization: Bearer qiniu-secret-token",
 		`{"signature_id":"sig-private","template_id":"template-private","mobiles":["13812345678"]}`,
 	} {
-		if strings.Contains(err.Error(), secret) || strings.Contains(detail.Message, secret) {
-			t.Fatalf("remote error leaked %q: error=%q message=%q", secret, err.Error(), detail.Message)
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("remote error leaked %q: error=%q", secret, err.Error())
 		}
 	}
 }
@@ -184,9 +187,12 @@ func TestSendRejectsMalformedSuccess(t *testing.T) {
 			defer server.Close()
 
 			_, err := testProvider(t, server.Client(), server.URL).Send(context.Background(), testRequest(t))
-			var detail *sms.SendError
-			if !errors.Is(err, sms.ErrInternal) || !errors.As(err, &detail) || detail.RequestID != "request-malformed" || strings.Contains(detail.Message, "13812345678") {
-				t.Fatalf("error = %v, detail = %#v", err, detail)
+			got := requireFailure(t, err, failure.UnknownOutcome)
+			if details := got.Details(); details.RequestID != "request-malformed" {
+				t.Fatalf("details = %#v", details)
+			}
+			if strings.Contains(err.Error(), "13812345678") {
+				t.Fatalf("error leaked recipient: %v", err)
 			}
 		})
 	}
@@ -224,9 +230,60 @@ func TestSendReturnsUnknownOutcomeAfterTransportError(t *testing.T) {
 	})}
 
 	_, err := testProvider(t, client, "https://example.invalid/v1/message").Send(ctx, testRequest(t))
-	var detail *sms.SendError
-	if !errors.Is(err, sms.ErrUnknownOutcome) || !errors.Is(err, cause) || !errors.Is(err, context.Canceled) || !errors.As(err, &detail) || strings.Contains(detail.Message, "13812345678") || calls.Load() != 1 {
-		t.Fatalf("error = %v, detail = %#v, calls = %d", err, detail, calls.Load())
+	requireFailure(t, err, failure.UnknownOutcome)
+	if errors.Is(err, cause) || !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "13812345678") || calls.Load() != 1 {
+		t.Fatalf("error = %v, calls = %d", err, calls.Load())
+	}
+}
+
+func TestSendReturnsUnknownOutcomeForInvalidRoundTripperResult(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, nil
+	})}
+
+	_, err := testProvider(t, client, "https://example.invalid/v1/message").Send(context.Background(), testRequest(t))
+	requireFailure(t, err, failure.UnknownOutcome)
+}
+
+func TestSendRecordsTransportContextEvidence(t *testing.T) {
+	tests := []struct {
+		name    string
+		context func() (context.Context, context.CancelFunc)
+		want    error
+	}{
+		{
+			name:    "canceled",
+			context: func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) },
+			want:    context.Canceled,
+		},
+		{
+			name: "deadline exceeded",
+			context: func() (context.Context, context.CancelFunc) {
+				return context.WithTimeout(context.Background(), 10*time.Millisecond)
+			},
+			want: context.DeadlineExceeded,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := tt.context()
+			defer cancel()
+			client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if tt.want == context.Canceled {
+					cancel()
+				} else {
+					<-req.Context().Done()
+				}
+				return nil, errors.New("transport failure")
+			})}
+
+			_, err := testProvider(t, client, "https://example.invalid/v1/message").Send(ctx, testRequest(t))
+			requireFailure(t, err, failure.UnknownOutcome)
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("error = %v, want %v", err, tt.want)
+			}
+		})
 	}
 }
 
@@ -252,14 +309,15 @@ func TestSendDoesNotExposeSecretTransportError(t *testing.T) {
 	})}
 
 	_, err := testProvider(t, client, "https://example.invalid/v1/message").Send(context.Background(), testRequest(t))
-	if !errors.Is(err, raw) || strings.Contains(err.Error(), raw.recipient) {
+	requireFailure(t, err, failure.UnknownOutcome)
+	if errors.Is(err, raw) || strings.Contains(err.Error(), raw.recipient) {
 		t.Fatalf("error = %v", err)
 	}
 	var recovered *secretQiniuTransportError
 	if errors.As(err, &recovered) {
 		t.Fatalf("raw transport error leaked through error chain: %#v", recovered)
 	}
-	if unwrap := errors.Unwrap(err); unwrap == nil || unwrap == raw || errors.Unwrap(unwrap) != nil || strings.Contains(unwrap.Error(), raw.recipient) {
+	if unwrap := errors.Unwrap(err); unwrap != nil {
 		t.Fatalf("unwrap = %#v", unwrap)
 	}
 }
@@ -282,6 +340,18 @@ func testProvider(t *testing.T, client *http.Client, endpoint string) *Provider 
 		t.Fatal(err)
 	}
 	return provider
+}
+
+func requireFailure(t *testing.T, err error, category failure.Category) failure.Failure {
+	t.Helper()
+	got, ok := failure.From(err)
+	if !ok {
+		t.Fatalf("error is not a Failure: %v", err)
+	}
+	if got.Category() != category {
+		t.Fatalf("category=%q want=%q", got.Category(), category)
+	}
+	return got
 }
 
 func testRequest(t *testing.T) sms.Request {
