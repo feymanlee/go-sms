@@ -24,7 +24,14 @@ func classifyError(ctx context.Context, err error, recipient sms.Recipient) erro
 			if contextErr := ctx.Err(); contextErr != nil {
 				cause = errors.Join(err, contextErr)
 			}
-			return providerutil.UnknownOutcome("tencent", recipient, cause)
+			return &sms.SendError{
+				Kind:      sms.KindUnknownOutcome,
+				Provider:  "tencent",
+				Code:      native.Code,
+				Message:   providerutil.Sanitize(native.Message, recipient),
+				RequestID: native.RequestId,
+				Cause:     cause,
+			}
 		}
 		return &sms.SendError{
 			Kind:      classifyCode(native.Code),

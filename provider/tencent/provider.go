@@ -109,12 +109,15 @@ func (p *Provider) Send(ctx context.Context, req sms.Request) (sms.Submission, e
 	if err != nil {
 		return sms.Submission{}, classifyError(ctx, err, req.Recipient)
 	}
+	requestID := ""
+	if response != nil && response.Response != nil {
+		requestID = stringValue(response.Response.RequestId)
+	}
 	if response == nil || response.Response == nil || len(response.Response.SendStatusSet) != 1 || response.Response.SendStatusSet[0] == nil || stringValue(response.Response.SendStatusSet[0].Code) == "" {
-		return sms.Submission{}, internalError("malformed response", "", nil)
+		return sms.Submission{}, internalError("malformed response", requestID, nil)
 	}
 
 	status := response.Response.SendStatusSet[0]
-	requestID := stringValue(response.Response.RequestId)
 	code := stringValue(status.Code)
 	if code != "Ok" {
 		return sms.Submission{}, &sms.SendError{

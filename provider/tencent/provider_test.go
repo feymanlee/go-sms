@@ -177,6 +177,14 @@ func TestSDKTransportCancellationIsUnknownOutcome(t *testing.T) {
 	if !errors.Is(err, sms.ErrUnknownOutcome) || !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v", err)
 	}
+	var detail *sms.SendError
+	var native *tcerr.TencentCloudSDKError
+	if !errors.As(err, &detail) || !errors.As(err, &native) || detail.Code != "ClientError.NetworkError" {
+		t.Fatalf("detail = %#v, native = %#v", detail, native)
+	}
+	if !errors.Is(detail.Cause, native) || !errors.Is(detail.Cause, context.Canceled) {
+		t.Fatalf("cause = %v", detail.Cause)
+	}
 }
 
 func TestSDKNetworkErrorIsUnknownOutcome(t *testing.T) {
@@ -199,6 +207,27 @@ func TestSDKNetworkErrorIsUnknownOutcome(t *testing.T) {
 	var native *tcerr.TencentCloudSDKError
 	if !errors.As(err, &detail) || !errors.As(err, &native) || native.Code != "ClientError.NetworkError" || detail.Cause != native {
 		t.Fatalf("native error = %#v", native)
+	}
+}
+
+func TestSendPreservesSDKNetworkErrorDetails(t *testing.T) {
+	native := tcerr.NewTencentCloudSDKError(
+		"ClientError.NetworkError",
+		"failed for +8613812345678",
+		"request-network",
+	)
+	provider := &Provider{client: &fakeClient{err: native}, appID: "1400000000"}
+
+	_, err := provider.Send(context.Background(), testRequest(t))
+	var detail *sms.SendError
+	if !errors.As(err, &detail) {
+		t.Fatalf("error = %v", err)
+	}
+	if detail.Kind != sms.KindUnknownOutcome || detail.Code != "ClientError.NetworkError" || detail.RequestID != "request-network" {
+		t.Fatalf("detail = %#v", detail)
+	}
+	if detail.Message != "failed for [recipient]" || detail.Cause != native {
+		t.Fatalf("message = %q, cause = %v", detail.Message, detail.Cause)
 	}
 }
 
@@ -250,8 +279,9 @@ func TestSendSanitizesRejectedStatus(t *testing.T) {
 
 func TestSendRejectsMalformedResponses(t *testing.T) {
 	tests := []struct {
-		name     string
-		response *tc.SendSmsResponse
+		name      string
+		response  *tc.SendSmsResponse
+		requestID string
 	}{
 		{name: "nil response"},
 		{name: "nil body", response: &tc.SendSmsResponse{}},
@@ -259,14 +289,15 @@ func TestSendRejectsMalformedResponses(t *testing.T) {
 		{name: "multiple statuses", response: &tc.SendSmsResponse{Response: &tc.SendSmsResponseParams{SendStatusSet: []*tc.SendStatus{{}, {}}}}},
 		{name: "nil status", response: &tc.SendSmsResponse{Response: &tc.SendSmsResponseParams{SendStatusSet: []*tc.SendStatus{nil}}}},
 		{name: "missing status code", response: &tc.SendSmsResponse{Response: &tc.SendSmsResponseParams{SendStatusSet: []*tc.SendStatus{{}}}}},
-		{name: "empty status code", response: response("", "", "", 0, "request-6")},
+		{name: "empty status code", response: response("", "", "", 0, "request-6"), requestID: "request-6"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			provider := &Provider{client: &fakeClient{response: tt.response}, appID: "1400000000"}
 			_, err := provider.Send(context.Background(), testRequest(t))
-			if !errors.Is(err, sms.ErrInternal) {
-				t.Fatalf("error = %v", err)
+			var detail *sms.SendError
+			if !errors.Is(err, sms.ErrInternal) || !errors.As(err, &detail) || detail.RequestID != tt.requestID {
+				t.Fatalf("error = %v, detail = %#v", err, detail)
 			}
 		})
 	}
