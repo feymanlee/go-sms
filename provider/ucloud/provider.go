@@ -51,6 +51,7 @@ func New(config Config, opts ...Option) (*Provider, error) {
 	if settings.client == nil {
 		settings.client = providerutil.NewHTTPClient()
 	}
+	settings.client = providerutil.NoRedirectClient(settings.client)
 	if strings.TrimSpace(settings.endpoint) == "" {
 		settings.endpoint = defaultEndpoint
 	}
@@ -128,15 +129,29 @@ func (p *Provider) Send(ctx context.Context, req sms.Request) (sms.Submission, e
 		Message   string `json:"Message"`
 		SessionNo string `json:"SessionNo"`
 	}
-	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
-		return sms.Submission{}, internalError("cannot decode response", nil)
+	if err := decodeResponse(response.Body, &body); err != nil {
+		return sms.Submission{}, internalError("cannot decode response", err)
 	}
 	if body.RetCode != 0 {
-		return sms.Submission{}, providerRejection(body.RetCode, body.Message, req.Recipient)
+		return sms.Submission{}, providerRejection(body.RetCode)
 	}
 	if body.SessionNo == "" {
 		return sms.Submission{}, internalError("malformed response", nil)
 	}
 
 	return sms.Submission{Provider: "ucloud", MessageID: body.SessionNo}, nil
+}
+
+func decodeResponse(body io.Reader, value any) error {
+	decoder := json.NewDecoder(body)
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("ucloud: unexpected additional JSON value")
+		}
+		return err
+	}
+	return nil
 }

@@ -55,25 +55,32 @@ func New(config Config, opts ...Option) (*Provider, error) {
 		client = providerutil.NewHTTPClient()
 	}
 
-	clientProfile := profile.NewClientProfile()
-	clientProfile.NetworkFailureMaxRetries = 0
-	clientProfile.RateLimitExceededMaxRetries = 0
-	clientProfile.HttpProfile.ReqTimeout = requestTimeout(client)
-	if settings.endpoint != "" {
-		clientProfile.HttpProfile.Endpoint = settings.endpoint
-	}
+	clientProfile := newClientProfile(client, settings.endpoint)
 
 	credential := tccommon.NewCredential(config.SecretID, config.SecretKey)
 	sdkClient, err := tc.NewClient(credential, config.Region, clientProfile)
 	if err != nil {
 		return nil, err
 	}
-	sdkClient.WithHttpTransport(client.Transport)
+	sdkClient.WithHttpTransport(providerutil.NoRedirectTransport(client.Transport))
 	return &Provider{
 		client:           sdkClient,
 		appID:            config.SMSAppID,
 		defaultSignature: config.DefaultSignatureRef,
 	}, nil
+}
+
+func newClientProfile(client *http.Client, endpoint string) *profile.ClientProfile {
+	clientProfile := profile.NewClientProfile()
+	clientProfile.NetworkFailureMaxRetries = 0
+	clientProfile.RateLimitExceededMaxRetries = 0
+	clientProfile.UnsafeRetryOnConnectionFailure = false
+	clientProfile.DisableRegionBreaker = true
+	clientProfile.HttpProfile.ReqTimeout = requestTimeout(client)
+	if endpoint != "" {
+		clientProfile.HttpProfile.Endpoint = endpoint
+	}
+	return clientProfile
 }
 
 func requestTimeout(client *http.Client) int {
@@ -124,7 +131,7 @@ func (p *Provider) Send(ctx context.Context, req sms.Request) (sms.Submission, e
 			Kind:      classifyStatusCode(code),
 			Provider:  "tencent",
 			Code:      code,
-			Message:   providerutil.Sanitize(stringValue(status.Message), req.Recipient),
+			Message:   providerErrorMessage,
 			RequestID: requestID,
 		}
 	}

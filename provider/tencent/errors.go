@@ -12,6 +12,11 @@ import (
 	tcerr "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/errors"
 )
 
+const (
+	providerErrorMessage = "tencent provider request failed"
+	sdkErrorMessage      = "tencent SDK request failed"
+)
+
 func classifyError(ctx context.Context, err error, recipient sms.Recipient) error {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || isNetworkError(err) {
 		return providerutil.UnknownOutcome("tencent", recipient, err)
@@ -30,13 +35,13 @@ func classifyError(ctx context.Context, err error, recipient sms.Recipient) erro
 			Kind:      classifyCode(native.Code),
 			Provider:  "tencent",
 			Code:      native.Code,
-			Message:   providerutil.Sanitize(native.Message, recipient),
+			Message:   sdkErrorMessage,
 			RequestID: native.RequestId,
-			Cause:     err,
+			Cause:     providerutil.OpaqueCause(err),
 		}
 	}
 
-	return internalError(providerutil.Sanitize(err.Error(), recipient), "", err)
+	return internalError(sdkErrorMessage, "", err)
 }
 
 func classifyCode(code string) sms.ErrorKind {
@@ -75,6 +80,6 @@ func internalError(message, requestID string, cause error) error {
 		Provider:  "tencent",
 		Message:   message,
 		RequestID: requestID,
-		Cause:     cause,
+		Cause:     providerutil.OpaqueCause(cause),
 	}
 }

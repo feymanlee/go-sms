@@ -6,9 +6,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	ali "github.com/alibabacloud-go/dysmsapi-20170525/v5/client"
@@ -203,7 +205,7 @@ func TestSendClassifiesSDKError(t *testing.T) {
 			})
 			fake := &fakeClient{err: native}
 			_, err := testProvider(fake).Send(context.Background(), testRequest(t))
-			if !errors.Is(err, tt.want) || errors.Is(err, native) || fake.calls != 1 {
+			if !errors.Is(err, tt.want) || !errors.Is(err, native) || fake.calls != 1 {
 				t.Fatalf("error = %v, calls = %d", err, fake.calls)
 			}
 			var sdkError *tea.SDKError
@@ -211,7 +213,7 @@ func TestSendClassifiesSDKError(t *testing.T) {
 				t.Fatalf("SDK error leaked through public error chain: %#v", sdkError)
 			}
 			var detail *sms.SendError
-			if !errors.As(err, &detail) || detail.Code != tt.code || detail.Message != "failed for [recipient] and [recipient]" || detail.RequestID != "request-sdk" {
+			if !errors.As(err, &detail) || detail.Code != tt.code || detail.Message != "aliyun SDK request failed" || detail.RequestID != "request-sdk" {
 				t.Fatalf("detail = %#v", detail)
 			}
 		})
@@ -227,7 +229,7 @@ func TestSendClassifiesDaraSDKError(t *testing.T) {
 	fake := &fakeClient{err: native}
 
 	_, err := testProvider(fake).Send(context.Background(), testRequest(t))
-	if !errors.Is(err, sms.ErrAuthentication) || errors.Is(err, native) || fake.calls != 1 {
+	if !errors.Is(err, sms.ErrAuthentication) || !errors.Is(err, native) || fake.calls != 1 {
 		t.Fatalf("error = %v, calls = %d", err, fake.calls)
 	}
 	var sdkError *dara.SDKError
@@ -247,7 +249,7 @@ func TestSendPreservesContextCancellationWithoutSDKErrorCause(t *testing.T) {
 	fake := &fakeClient{err: native, beforeReturn: cancel}
 
 	_, err := testProvider(fake).Send(ctx, testRequest(t))
-	if !errors.Is(err, sms.ErrUnknownOutcome) || !errors.Is(err, context.Canceled) || errors.Is(err, native) || fake.calls != 1 {
+	if !errors.Is(err, sms.ErrUnknownOutcome) || !errors.Is(err, context.Canceled) || !errors.Is(err, native) || fake.calls != 1 {
 		t.Fatalf("error = %v, calls = %d", err, fake.calls)
 	}
 	var sdkError *tea.SDKError
@@ -294,6 +296,70 @@ func TestSendPreservesContextCancellationWhenSDKReturnsOpaqueError(t *testing.T)
 	if !errors.Is(err, sms.ErrUnknownOutcome) || !errors.Is(err, context.Canceled) || !errors.Is(err, native) || fake.calls != 1 {
 		t.Fatalf("post-invocation error = %v, calls = %d", err, fake.calls)
 	}
+}
+
+func TestSendDoesNotExposeUntrustedProviderMessages(t *testing.T) {
+	remoteMessage, secrets := adversarialRemoteMessage(testRequest(t), "access-secret")
+	fake := &fakeClient{response: response("isv.TEMPLATE_ILLEGAL", remoteMessage, "", "request-adversarial")}
+
+	_, err := testProvider(fake).Send(context.Background(), testRequest(t))
+	var detail *sms.SendError
+	if !errors.Is(err, sms.ErrRejected) || !errors.As(err, &detail) {
+		t.Fatalf("error = %v, detail = %#v", err, detail)
+	}
+	if detail.Code != "isv.TEMPLATE_ILLEGAL" || detail.RequestID != "request-adversarial" || detail.Message != "aliyun provider request failed" {
+		t.Fatalf("detail = %#v", detail)
+	}
+	assertNoSensitiveText(t, secrets, err.Error(), detail.Message)
+}
+
+func TestSendKeepsSDKCauseOpaqueAndMatchable(t *testing.T) {
+	remoteMessage, secrets := adversarialRemoteMessage(testRequest(t), "access-secret")
+	native := tea.NewSDKError(map[string]interface{}{
+		"code":       "InvalidAccessKeyId.NotFound",
+		"statusCode": http.StatusForbidden,
+		"message":    remoteMessage,
+		"data":       map[string]interface{}{"RequestId": "request-native"},
+	})
+
+	_, err := testProvider(&fakeClient{err: native}).Send(context.Background(), testRequest(t))
+	var detail *sms.SendError
+	if !errors.Is(err, sms.ErrAuthentication) || !errors.Is(err, native) || !errors.As(err, &detail) {
+		t.Fatalf("error = %v, detail = %#v", err, detail)
+	}
+	if detail.Code != "InvalidAccessKeyId.NotFound" || detail.RequestID != "request-native" || detail.Message != "aliyun SDK request failed" {
+		t.Fatalf("detail = %#v", detail)
+	}
+	var recovered *tea.SDKError
+	if errors.As(err, &recovered) {
+		t.Fatalf("raw SDK error leaked through errors.As: %#v", recovered)
+	}
+	if detail.Cause == nil || errors.Unwrap(detail.Cause) != nil {
+		t.Fatalf("cause = %#v", detail.Cause)
+	}
+	assertNoSensitiveText(t, secrets, err.Error(), detail.Message, detail.Cause.Error(), errors.Unwrap(err).Error())
+}
+
+func TestSendKeepsUnmatchedSDKCauseOpaqueAndMatchable(t *testing.T) {
+	remoteMessage, secrets := adversarialRemoteMessage(testRequest(t), "access-secret")
+	native := &sensitiveSDKError{message: remoteMessage}
+
+	_, err := testProvider(&fakeClient{err: native}).Send(context.Background(), testRequest(t))
+	var detail *sms.SendError
+	if !errors.Is(err, sms.ErrInternal) || !errors.Is(err, native) || !errors.As(err, &detail) {
+		t.Fatalf("error = %v, detail = %#v", err, detail)
+	}
+	if detail.Message != "aliyun SDK request failed" {
+		t.Fatalf("detail = %#v", detail)
+	}
+	var recovered *sensitiveSDKError
+	if errors.As(err, &recovered) {
+		t.Fatalf("raw SDK error leaked through errors.As: %#v", recovered)
+	}
+	if detail.Cause == nil || errors.Unwrap(detail.Cause) != nil {
+		t.Fatalf("cause = %#v", detail.Cause)
+	}
+	assertNoSensitiveText(t, secrets, err.Error(), detail.Message, detail.Cause.Error(), errors.Unwrap(err).Error())
 }
 
 func TestSendRejectsMalformedResponse(t *testing.T) {
@@ -450,6 +516,68 @@ func TestDaraHTTPClientDelegatesToInjectedClient(t *testing.T) {
 	}
 }
 
+func TestSDKDoesNotFollowRedirectsOrMutateCallerClient(t *testing.T) {
+	var targetCalls atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetCalls.Add(1)
+		_, _ = io.WriteString(w, `{"Code":"OK","Message":"OK","BizId":"biz-redirect","RequestId":"request-redirect"}`)
+	}))
+	defer target.Close()
+
+	source := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", target.URL)
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	defer source.Close()
+
+	callerClient := source.Client()
+	callerClient.CheckRedirect = func(*http.Request, []*http.Request) error { return nil }
+	provider, err := New(
+		Config{AccessKeyID: "id", AccessKeySecret: "secret", Region: "cn-hangzhou"},
+		WithHTTPClient(callerClient),
+		WithEndpoint(strings.TrimPrefix(source.URL, "https://")),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _ = provider.Send(context.Background(), testRequest(t))
+	if got := targetCalls.Load(); got != 0 {
+		t.Fatalf("redirect target calls = %d, want 0", got)
+	}
+	if callerClient.CheckRedirect == nil {
+		t.Fatal("caller client CheckRedirect was mutated")
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+type sensitiveSDKError struct {
+	message string
+}
+
+func (e *sensitiveSDKError) Error() string { return e.message }
+
+func adversarialRemoteMessage(req sms.Request, credential string) (string, []string) {
+	secrets := []string{
+		"+12025550123",
+		url.QueryEscape(req.Recipient.String()),
+		credential,
+		req.Message.Params[0].Value,
+		`{"PhoneNumbers":"+12025550123","TemplateParam":{"code":"123456"}}`,
+	}
+	return strings.Join(secrets, " | "), secrets
+}
+
+func assertNoSensitiveText(t *testing.T, secrets []string, texts ...string) {
+	t.Helper()
+	for _, text := range texts {
+		for _, secret := range secrets {
+			if strings.Contains(text, secret) {
+				t.Fatalf("public error text leaked %q: %q", secret, text)
+			}
+		}
+	}
+}

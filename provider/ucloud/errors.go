@@ -7,6 +7,8 @@ import (
 	"github.com/feymanlee/go-sms/internal/providerutil"
 )
 
+const providerErrorMessage = "ucloud provider request failed"
+
 func httpErrorKind(status int) sms.ErrorKind {
 	switch {
 	case status == 401 || status == 403:
@@ -20,12 +22,12 @@ func httpErrorKind(status int) sms.ErrorKind {
 	}
 }
 
-func providerRejection(code int, message string, recipient sms.Recipient) error {
+func providerRejection(code int) error {
 	return &sms.SendError{
 		Kind:     sms.KindRejected,
 		Provider: "ucloud",
 		Code:     strconv.Itoa(code),
-		Message:  providerutil.Sanitize(message, recipient),
+		Message:  providerErrorMessage,
 	}
 }
 
@@ -34,6 +36,6 @@ func internalError(message string, cause error) error {
 		Kind:     sms.KindInternal,
 		Provider: "ucloud",
 		Message:  message,
-		Cause:    cause,
+		Cause:    providerutil.OpaqueCause(cause),
 	}
 }

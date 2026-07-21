@@ -15,6 +15,11 @@ import (
 	"github.com/feymanlee/go-sms/internal/providerutil"
 )
 
+const (
+	providerErrorMessage = "aliyun provider request failed"
+	sdkErrorMessage      = "aliyun SDK request failed"
+)
+
 func classifyBodyCode(code string) sms.ErrorKind {
 	switch code {
 	case "isv.BUSINESS_LIMIT_CONTROL", "isv.DAY_LIMIT_CONTROL":
@@ -29,7 +34,7 @@ func classifyBodyCode(code string) sms.ErrorKind {
 }
 
 func classifyError(ctx context.Context, err error, recipient sms.Recipient) error {
-	code, message, requestID, status, sdkError := sdkErrorDetails(err)
+	code, requestID, status, sdkError := sdkErrorDetails(err)
 	if sdkError {
 		kind := sms.KindInternal
 		switch {
@@ -39,18 +44,18 @@ func classifyError(ctx context.Context, err error, recipient sms.Recipient) erro
 		case status >= http.StatusInternalServerError, isUnavailableCode(code):
 			kind = sms.KindUnavailable
 		}
-		cause := error(nil)
+		cause := err
 		if contextErr := ctx.Err(); contextErr != nil {
 			kind = sms.KindUnknownOutcome
-			cause = contextErr
+			cause = errors.Join(err, contextErr)
 		}
 		return &sms.SendError{
 			Kind:      kind,
 			Provider:  "aliyun",
 			Code:      code,
-			Message:   providerutil.Sanitize(message, recipient),
+			Message:   sdkErrorMessage,
 			RequestID: requestID,
-			Cause:     cause,
+			Cause:     providerutil.OpaqueCause(cause),
 		}
 	}
 
@@ -61,19 +66,19 @@ func classifyError(ctx context.Context, err error, recipient sms.Recipient) erro
 		return providerutil.UnknownOutcome("aliyun", recipient, errors.Join(err, contextErr))
 	}
 
-	return internalError(providerutil.Sanitize(err.Error(), recipient), "", err)
+	return internalError(sdkErrorMessage, "", err)
 }
 
-func sdkErrorDetails(err error) (code, message, requestID string, status int, ok bool) {
+func sdkErrorDetails(err error) (code, requestID string, status int, ok bool) {
 	var teaError *tea.SDKError
 	if errors.As(err, &teaError) {
-		return tea.StringValue(teaError.Code), tea.StringValue(teaError.Message), requestIDFromData(tea.StringValue(teaError.Data)), tea.IntValue(teaError.StatusCode), true
+		return tea.StringValue(teaError.Code), requestIDFromData(tea.StringValue(teaError.Data)), tea.IntValue(teaError.StatusCode), true
 	}
 	var daraError *dara.SDKError
 	if errors.As(err, &daraError) {
-		return dara.StringValue(daraError.Code), dara.StringValue(daraError.Message), requestIDFromData(dara.StringValue(daraError.Data)), dara.IntValue(daraError.StatusCode), true
+		return dara.StringValue(daraError.Code), requestIDFromData(dara.StringValue(daraError.Data)), dara.IntValue(daraError.StatusCode), true
 	}
-	return "", "", "", 0, false
+	return "", "", 0, false
 }
 
 func requestIDFromData(data string) string {
@@ -110,6 +115,6 @@ func internalError(message, requestID string, cause error) error {
 		Provider:  "aliyun",
 		Message:   message,
 		RequestID: requestID,
-		Cause:     cause,
+		Cause:     providerutil.OpaqueCause(cause),
 	}
 }

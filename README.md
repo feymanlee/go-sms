@@ -92,6 +92,13 @@ exact `Config` fields:
 | Qiniu Cloud | `provider/qiniu` | `AccessKey`, `SecretKey`, optional `DefaultSignatureRef` |
 | Yunpian | `provider/yunpian` | `APIKey` |
 
+`WithEndpoint` syntax is Provider-specific. Tencent Cloud and Alibaba Cloud
+pass the value to their official SDKs, so it must be an endpoint host (for
+example, `sms.internal.example` or `127.0.0.1:8443`) without a URL scheme or
+path. UCloud, Qiniu Cloud, and Yunpian perform direct HTTP requests and require
+an absolute `http://` or `https://` URL; Qiniu and Yunpian custom endpoints
+must include the API path used for the send operation.
+
 Credentials and Provider business settings are explicit constructor inputs.
 The library does not load them from environment variables or configuration
 files. Default clients retain Go's standard `HTTP_PROXY`, `HTTPS_PROXY`, and

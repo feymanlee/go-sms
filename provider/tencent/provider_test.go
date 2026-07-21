@@ -7,8 +7,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -121,7 +123,7 @@ func TestSendRejectsNonOKStatus(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 	var detail *sms.SendError
-	if !errors.As(err, &detail) || detail.Code != "FailedOperation.TemplateIncorrectOrUnapproved" || detail.RequestID != "request-2" || detail.Message != "bad template" {
+	if !errors.As(err, &detail) || detail.Code != "FailedOperation.TemplateIncorrectOrUnapproved" || detail.RequestID != "request-2" || detail.Message != "tencent provider request failed" {
 		t.Fatalf("detail = %#v", detail)
 	}
 }
@@ -216,6 +218,41 @@ func TestSDKNetworkErrorIsUnknownOutcome(t *testing.T) {
 	}
 }
 
+func TestSDKDoesNotFollowRedirectsOrMutateCallerClient(t *testing.T) {
+	var targetCalls atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetCalls.Add(1)
+		_, _ = io.WriteString(w, `{"Response":{"SendStatusSet":[{"Code":"Ok","Message":"ok","SerialNo":"serial-redirect","Fee":1}],"RequestId":"request-redirect"}}`)
+	}))
+	defer target.Close()
+
+	source := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", target.URL)
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	defer source.Close()
+
+	callerClient := source.Client()
+	originalRedirect := func(*http.Request, []*http.Request) error { return nil }
+	callerClient.CheckRedirect = originalRedirect
+	provider, err := New(
+		Config{SecretID: "id", SecretKey: "key", SMSAppID: "app", Region: "ap-guangzhou"},
+		WithHTTPClient(callerClient),
+		WithEndpoint(strings.TrimPrefix(source.URL, "https://")),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _ = provider.Send(context.Background(), testRequest(t))
+	if got := targetCalls.Load(); got != 0 {
+		t.Fatalf("redirect target calls = %d, want 0", got)
+	}
+	if callerClient.CheckRedirect == nil {
+		t.Fatal("caller client CheckRedirect was mutated")
+	}
+}
+
 func TestSendPreservesSDKNetworkErrorDetails(t *testing.T) {
 	native := tcerr.NewTencentCloudSDKError(
 		"ClientError.NetworkError",
@@ -247,6 +284,76 @@ func TestSendPreservesSDKNetworkErrorDetails(t *testing.T) {
 	if detail.Cause == native || errors.Unwrap(detail.Cause) != nil {
 		t.Fatalf("cause = %#v", detail.Cause)
 	}
+}
+
+func TestSendDoesNotExposeUntrustedProviderMessages(t *testing.T) {
+	remoteMessage, secrets := adversarialRemoteMessage(testRequest(t), "secret-key")
+	provider := &Provider{
+		client: &fakeClient{response: response(
+			"FailedOperation.TemplateIncorrectOrUnapproved",
+			remoteMessage,
+			"",
+			0,
+			"request-adversarial",
+		)},
+		appID: "1400000000",
+	}
+
+	_, err := provider.Send(context.Background(), testRequest(t))
+	var detail *sms.SendError
+	if !errors.Is(err, sms.ErrRejected) || !errors.As(err, &detail) {
+		t.Fatalf("error = %v, detail = %#v", err, detail)
+	}
+	if detail.Code != "FailedOperation.TemplateIncorrectOrUnapproved" || detail.RequestID != "request-adversarial" || detail.Message != "tencent provider request failed" {
+		t.Fatalf("detail = %#v", detail)
+	}
+	assertNoSensitiveText(t, secrets, err.Error(), detail.Message)
+}
+
+func TestSendKeepsNativeSDKCauseOpaqueAndMatchable(t *testing.T) {
+	remoteMessage, secrets := adversarialRemoteMessage(testRequest(t), "secret-key")
+	native := tcerr.NewTencentCloudSDKError("AuthFailure.SecretIdNotFound", remoteMessage, "request-native")
+	provider := &Provider{client: &fakeClient{err: native}, appID: "1400000000"}
+
+	_, err := provider.Send(context.Background(), testRequest(t))
+	var detail *sms.SendError
+	if !errors.Is(err, sms.ErrAuthentication) || !errors.Is(err, native) || !errors.As(err, &detail) {
+		t.Fatalf("error = %v, detail = %#v", err, detail)
+	}
+	if detail.Code != "AuthFailure.SecretIdNotFound" || detail.RequestID != "request-native" || detail.Message != "tencent SDK request failed" {
+		t.Fatalf("detail = %#v", detail)
+	}
+	var recovered *tcerr.TencentCloudSDKError
+	if errors.As(err, &recovered) {
+		t.Fatalf("raw SDK error leaked through errors.As: %#v", recovered)
+	}
+	if detail.Cause == nil || errors.Unwrap(detail.Cause) != nil {
+		t.Fatalf("cause = %#v", detail.Cause)
+	}
+	assertNoSensitiveText(t, secrets, err.Error(), detail.Message, detail.Cause.Error(), errors.Unwrap(err).Error())
+}
+
+func TestSendKeepsUnmatchedSDKCauseOpaqueAndMatchable(t *testing.T) {
+	remoteMessage, secrets := adversarialRemoteMessage(testRequest(t), "secret-key")
+	native := &sensitiveSDKError{message: remoteMessage}
+	provider := &Provider{client: &fakeClient{err: native}, appID: "1400000000"}
+
+	_, err := provider.Send(context.Background(), testRequest(t))
+	var detail *sms.SendError
+	if !errors.Is(err, sms.ErrInternal) || !errors.Is(err, native) || !errors.As(err, &detail) {
+		t.Fatalf("error = %v, detail = %#v", err, detail)
+	}
+	if detail.Message != "tencent SDK request failed" {
+		t.Fatalf("detail = %#v", detail)
+	}
+	var recovered *sensitiveSDKError
+	if errors.As(err, &recovered) {
+		t.Fatalf("raw SDK error leaked through errors.As: %#v", recovered)
+	}
+	if detail.Cause == nil || errors.Unwrap(detail.Cause) != nil {
+		t.Fatalf("cause = %#v", detail.Cause)
+	}
+	assertNoSensitiveText(t, secrets, err.Error(), detail.Message, detail.Cause.Error(), errors.Unwrap(err).Error())
 }
 
 func TestSendClassifiesNativeErrors(t *testing.T) {
@@ -292,6 +399,34 @@ func TestSendSanitizesRejectedStatus(t *testing.T) {
 	var detail *sms.SendError
 	if !errors.As(err, &detail) || strings.Contains(detail.Message, "13812345678") {
 		t.Fatalf("detail = %#v", detail)
+	}
+}
+
+type sensitiveSDKError struct {
+	message string
+}
+
+func (e *sensitiveSDKError) Error() string { return e.message }
+
+func adversarialRemoteMessage(req sms.Request, credential string) (string, []string) {
+	secrets := []string{
+		"+12025550123",
+		url.QueryEscape(req.Recipient.String()),
+		credential,
+		req.Message.Params[0].Value,
+		`{"PhoneNumberSet":["+12025550123"],"TemplateParamSet":["123456"]}`,
+	}
+	return strings.Join(secrets, " | "), secrets
+}
+
+func assertNoSensitiveText(t *testing.T, secrets []string, texts ...string) {
+	t.Helper()
+	for _, text := range texts {
+		for _, secret := range secrets {
+			if strings.Contains(text, secret) {
+				t.Fatalf("public error text leaked %q: %q", secret, text)
+			}
+		}
 	}
 }
 
@@ -438,6 +573,27 @@ func TestNewConfiguresSDKProfile(t *testing.T) {
 	}
 	if request.URL.Host != "sms.internal.example" {
 		t.Fatalf("request host = %q", request.URL.Host)
+	}
+}
+
+func TestClientProfileDisablesRetriesAndRegionBreaker(t *testing.T) {
+	client := &http.Client{Timeout: 1500 * time.Millisecond}
+	clientProfile := newClientProfile(client, "sms.internal.example")
+
+	if clientProfile.NetworkFailureMaxRetries != 0 {
+		t.Fatalf("NetworkFailureMaxRetries = %d, want 0", clientProfile.NetworkFailureMaxRetries)
+	}
+	if clientProfile.RateLimitExceededMaxRetries != 0 {
+		t.Fatalf("RateLimitExceededMaxRetries = %d, want 0", clientProfile.RateLimitExceededMaxRetries)
+	}
+	if !clientProfile.DisableRegionBreaker {
+		t.Fatal("DisableRegionBreaker = false, want true")
+	}
+	if clientProfile.UnsafeRetryOnConnectionFailure {
+		t.Fatal("UnsafeRetryOnConnectionFailure = true, want false")
+	}
+	if clientProfile.HttpProfile.ReqTimeout != 2 || clientProfile.HttpProfile.Endpoint != "sms.internal.example" {
+		t.Fatalf("HttpProfile = %#v", clientProfile.HttpProfile)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -83,6 +84,36 @@ func TestSendUsesDefaultSignature(t *testing.T) {
 	}
 }
 
+func TestSendDoesNotFollowRedirectsOrMutateCallerClient(t *testing.T) {
+	var targetCalls atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetCalls.Add(1)
+		_, _ = io.WriteString(w, `{"RetCode":0,"SessionNo":"session-redirect"}`)
+	}))
+	defer target.Close()
+
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", target.URL)
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	defer source.Close()
+
+	callerClient := source.Client()
+	callerClient.CheckRedirect = func(*http.Request, []*http.Request) error { return nil }
+	provider, err := New(testConfig(), WithHTTPClient(callerClient), WithEndpoint(source.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _ = provider.Send(context.Background(), testRequest(t))
+	if got := targetCalls.Load(); got != 0 {
+		t.Fatalf("redirect target calls = %d, want 0", got)
+	}
+	if callerClient.CheckRedirect == nil {
+		t.Fatal("caller client CheckRedirect was mutated")
+	}
+}
+
 func TestSendClassifiesHTTPResponses(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -131,6 +162,42 @@ func TestSendClassifiesProviderRejectionAndSanitizesMessage(t *testing.T) {
 	}
 }
 
+func TestSendDoesNotExposeUntrustedProviderMessages(t *testing.T) {
+	req := testRequest(t)
+	secrets := []string{
+		"+12025550123",
+		"%2B8613812345678",
+		"private-1",
+		req.Message.Params[0].Value,
+		`{"PhoneNumbers.0":"(1)2025550123","TemplateParams.0":"123456"}`,
+	}
+	remoteMessage := strings.Join(secrets, " | ")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"RetCode":170,"Message":`+strconv.Quote(remoteMessage)+`}`)
+	}))
+	defer server.Close()
+	provider, err := New(testConfig(), WithHTTPClient(server.Client()), WithEndpoint(server.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = provider.Send(context.Background(), req)
+	var detail *sms.SendError
+	if !errors.Is(err, sms.ErrRejected) || !errors.As(err, &detail) {
+		t.Fatalf("error = %v, detail = %#v", err, detail)
+	}
+	if detail.Code != "170" || detail.Message != "ucloud provider request failed" {
+		t.Fatalf("detail = %#v", detail)
+	}
+	for _, text := range []string{err.Error(), detail.Message} {
+		for _, secret := range secrets {
+			if strings.Contains(text, secret) {
+				t.Fatalf("public error text leaked %q: %q", secret, text)
+			}
+		}
+	}
+}
+
 func TestSendRejectsMalformedSuccessfulResponses(t *testing.T) {
 	tests := []struct {
 		name string
@@ -155,6 +222,49 @@ func TestSendRejectsMalformedSuccessfulResponses(t *testing.T) {
 				t.Fatalf("error = %v, detail = %#v", err, detail)
 			}
 		})
+	}
+}
+
+func TestSendRejectsContentAfterOneJSONDocument(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "trailing garbage", body: `{"RetCode":0,"SessionNo":"session-1"} trailing`},
+		{name: "second document", body: `{"RetCode":0,"SessionNo":"session-1"}{"RetCode":0,"SessionNo":"session-2"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			defer server.Close()
+			provider, err := New(testConfig(), WithHTTPClient(server.Client()), WithEndpoint(server.URL))
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			_, err = provider.Send(context.Background(), testRequest(t))
+			if !errors.Is(err, sms.ErrInternal) {
+				t.Fatalf("error = %v, want internal", err)
+			}
+		})
+	}
+}
+
+func TestSendAcceptsTrailingJSONWhitespace(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "{\"RetCode\":0,\"SessionNo\":\"session-1\"}\n\t ")
+	}))
+	defer server.Close()
+	provider, err := New(testConfig(), WithHTTPClient(server.Client()), WithEndpoint(server.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	submission, err := provider.Send(context.Background(), testRequest(t))
+	if err != nil || submission.MessageID != "session-1" {
+		t.Fatalf("submission = %#v, error = %v", submission, err)
 	}
 }
 

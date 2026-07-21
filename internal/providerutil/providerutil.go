@@ -56,18 +56,25 @@ func unknownOutcome(provider, code, requestID string, cause error) error {
 		Code:      code,
 		Message:   unknownOutcomeMessage,
 		RequestID: requestID,
-		Cause:     sanitizedCause{cause: cause},
+		Cause:     OpaqueCause(cause),
 	}
 }
 
-// sanitizedCause preserves errors.Is behavior without exposing the original error chain.
-type sanitizedCause struct {
+// OpaqueCause preserves errors.Is behavior without exposing the original error chain.
+func OpaqueCause(cause error) error {
+	if cause == nil {
+		return nil
+	}
+	return opaqueCause{cause: cause}
+}
+
+type opaqueCause struct {
 	cause error
 }
 
-func (e sanitizedCause) Error() string { return unknownOutcomeMessage }
+func (e opaqueCause) Error() string { return unknownOutcomeMessage }
 
-func (e sanitizedCause) Is(target error) bool { return errors.Is(e.cause, target) }
+func (e opaqueCause) Is(target error) bool { return errors.Is(e.cause, target) }
 
 // Sanitize replaces the recipient's E.164 and national forms in a message.
 func Sanitize(message string, recipient sms.Recipient) string {
@@ -126,4 +133,33 @@ func NewHTTPClient() *http.Client {
 		ExpectContinueTimeout: time.Second,
 	}
 	return &http.Client{Transport: transport, Timeout: 10 * time.Second}
+}
+
+// NoRedirectClient returns a shallow client copy that treats redirects as terminal responses.
+func NoRedirectClient(client *http.Client) *http.Client {
+	clone := *client
+	clone.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &clone
+}
+
+// NoRedirectTransport prevents an owning http.Client from discovering redirect targets.
+func NoRedirectTransport(transport http.RoundTripper) http.RoundTripper {
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	return noRedirectTransport{base: transport}
+}
+
+type noRedirectTransport struct {
+	base http.RoundTripper
+}
+
+func (t noRedirectTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	response, err := t.base.RoundTrip(req)
+	if response != nil && response.StatusCode >= http.StatusMultipleChoices && response.StatusCode < http.StatusBadRequest {
+		response.Header.Del("Location")
+	}
+	return response, err
 }

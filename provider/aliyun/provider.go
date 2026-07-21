@@ -60,6 +60,7 @@ func New(config Config, opts ...Option) (*Provider, error) {
 	if httpClient == nil {
 		httpClient = providerutil.NewHTTPClient()
 	}
+	httpClient = providerutil.NoRedirectClient(httpClient)
 
 	sdkConfig := &openapiutil.Config{
 		AccessKeyId:     dara.String(config.AccessKeyID),
@@ -135,7 +136,7 @@ func (p *Provider) Send(ctx context.Context, req sms.Request) (sms.Submission, e
 			Kind:      classifyBodyCode(code),
 			Provider:  "aliyun",
 			Code:      code,
-			Message:   providerutil.Sanitize(dara.StringValue(response.Body.Message), req.Recipient),
+			Message:   providerErrorMessage,
 			RequestID: requestID,
 		}
 	}
