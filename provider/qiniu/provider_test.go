@@ -143,7 +143,12 @@ func TestSendClassifiesHTTPResponsesAndCapturesRequestID(t *testing.T) {
 }
 
 func TestSendRejectsMalformedSuccess(t *testing.T) {
-	for _, body := range []string{"not JSON for +8613812345678", `{}`} {
+	for _, body := range []string{
+		"not JSON for +8613812345678",
+		`{}`,
+		`{"job_id":"job-1"} trailing garbage`,
+		`{"job_id":"job-1"}{"job_id":"job-2"}`,
+	} {
 		t.Run(body, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("X-Reqid", "request-malformed")
@@ -227,7 +232,7 @@ func TestSendDoesNotExposeSecretTransportError(t *testing.T) {
 	if errors.As(err, &recovered) {
 		t.Fatalf("raw transport error leaked through error chain: %#v", recovered)
 	}
-	if unwrap := errors.Unwrap(err); unwrap == nil || unwrap == raw || !strings.Contains(unwrap.Error(), "connection reset for [recipient]") || errors.Unwrap(unwrap) != nil || strings.Contains(unwrap.Error(), raw.recipient) {
+	if unwrap := errors.Unwrap(err); unwrap == nil || unwrap == raw || errors.Unwrap(unwrap) != nil || strings.Contains(unwrap.Error(), raw.recipient) {
 		t.Fatalf("unwrap = %#v", unwrap)
 	}
 }

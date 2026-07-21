@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 
@@ -126,11 +127,25 @@ func (p *Provider) Send(ctx context.Context, req sms.Request) (sms.Submission, e
 	var responseBody struct {
 		JobID string `json:"job_id"`
 	}
-	if err := json.NewDecoder(response.Body).Decode(&responseBody); err != nil {
+	if err := decodeResponse(response.Body, &responseBody); err != nil {
 		return sms.Submission{}, internalError("cannot decode response", requestID)
 	}
 	if responseBody.JobID == "" {
 		return sms.Submission{}, internalError("malformed response", requestID)
 	}
 	return sms.Submission{Provider: "qiniu", MessageID: responseBody.JobID, RequestID: requestID}, nil
+}
+
+func decodeResponse(body io.Reader, value any) error {
+	decoder := json.NewDecoder(body)
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("qiniu: unexpected additional JSON value")
+		}
+		return err
+	}
+	return nil
 }

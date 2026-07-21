@@ -37,23 +37,35 @@ func Prepare(ctx context.Context, provider string, req sms.Request, defaultSigna
 	return signature, nil
 }
 
-// UnknownOutcome wraps an indeterminate provider failure without exposing the recipient.
+const unknownOutcomeMessage = "provider request outcome is unknown"
+
+// UnknownOutcome wraps an indeterminate provider failure without exposing cause text.
 func UnknownOutcome(provider string, recipient sms.Recipient, cause error) error {
+	return unknownOutcome(provider, "", "", cause)
+}
+
+// UnknownOutcomeWithDetails wraps an indeterminate provider failure with safe provider metadata.
+func UnknownOutcomeWithDetails(provider, code, requestID string, cause error) error {
+	return unknownOutcome(provider, code, requestID, cause)
+}
+
+func unknownOutcome(provider, code, requestID string, cause error) error {
 	return &sms.SendError{
-		Kind:     sms.KindUnknownOutcome,
-		Provider: provider,
-		Message:  Sanitize(cause.Error(), recipient),
-		Cause:    sanitizedCause{message: Sanitize(cause.Error(), recipient), cause: cause},
+		Kind:      sms.KindUnknownOutcome,
+		Provider:  provider,
+		Code:      code,
+		Message:   unknownOutcomeMessage,
+		RequestID: requestID,
+		Cause:     sanitizedCause{cause: cause},
 	}
 }
 
 // sanitizedCause preserves errors.Is behavior without exposing the original error chain.
 type sanitizedCause struct {
-	message string
-	cause   error
+	cause error
 }
 
-func (e sanitizedCause) Error() string { return e.message }
+func (e sanitizedCause) Error() string { return unknownOutcomeMessage }
 
 func (e sanitizedCause) Is(target error) bool { return errors.Is(e.cause, target) }
 

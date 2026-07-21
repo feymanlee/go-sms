@@ -59,31 +59,51 @@ func TestNewHTTPClientTimeout(t *testing.T) {
 	}
 }
 
-func TestUnknownOutcomeSanitizesUnwrappedCauseWithoutLosingIsMatchability(t *testing.T) {
+func TestUnknownOutcomeHidesAllRawCauseTextWithoutLosingIsMatchability(t *testing.T) {
 	req := request(t, "+8613812345678")
-	raw := &secretTransportError{recipient: req.Recipient.String()}
+	raw := &secretTransportError{
+		recipient:  req.Recipient.String(),
+		foreign:    "+12025550123",
+		credential: "Authorization: Bearer secret-token",
+		body:       `{"message":"private response body"}`,
+	}
 	err := UnknownOutcome("fake", req.Recipient, raw)
 
 	if !errors.Is(err, sms.ErrUnknownOutcome) || !errors.Is(err, raw) {
 		t.Fatalf("error does not preserve sentinel or raw identity: %v", err)
 	}
-	if strings.Contains(err.Error(), raw.recipient) {
-		t.Fatalf("Error leaked recipient: %q", err)
+	var detail *sms.SendError
+	if !errors.As(err, &detail) {
+		t.Fatalf("SendError = %v", err)
+	}
+	for _, text := range []string{err.Error(), detail.Message, errors.Unwrap(err).Error()} {
+		for _, secret := range raw.secrets() {
+			if strings.Contains(text, secret) {
+				t.Fatalf("public error text leaked %q: %q", secret, text)
+			}
+		}
+	}
+	unwrap := errors.Unwrap(err)
+	if unwrap == nil || unwrap == raw || errors.Unwrap(unwrap) != nil {
+		t.Fatalf("unwrap = %#v", unwrap)
 	}
 	var recovered *secretTransportError
 	if errors.As(err, &recovered) {
 		t.Fatalf("raw transport error leaked through error chain: %#v", recovered)
 	}
-	unwrap := errors.Unwrap(err)
-	if unwrap == nil || unwrap == raw || unwrap.Error() != "transport failed for [recipient]" || errors.Unwrap(unwrap) != nil || strings.Contains(unwrap.Error(), raw.recipient) {
-		t.Fatalf("unwrap = %#v", unwrap)
-	}
 }
 
 type secretTransportError struct {
-	recipient string
+	recipient  string
+	foreign    string
+	credential string
+	body       string
 }
 
 func (e *secretTransportError) Error() string {
-	return "transport failed for " + e.recipient
+	return "transport failed for " + e.recipient + ", " + e.foreign + ", " + e.credential + ", " + e.body
+}
+
+func (e *secretTransportError) secrets() []string {
+	return []string{e.recipient, e.foreign, e.credential, e.body}
 }

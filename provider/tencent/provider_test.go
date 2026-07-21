@@ -179,10 +179,13 @@ func TestSDKTransportCancellationIsUnknownOutcome(t *testing.T) {
 	}
 	var detail *sms.SendError
 	var native *tcerr.TencentCloudSDKError
-	if !errors.As(err, &detail) || !errors.As(err, &native) || detail.Code != "ClientError.NetworkError" {
-		t.Fatalf("detail = %#v, native = %#v", detail, native)
+	if !errors.As(err, &detail) || detail.Code != "ClientError.NetworkError" {
+		t.Fatalf("detail = %#v", detail)
 	}
-	if !errors.Is(detail.Cause, native) || !errors.Is(detail.Cause, context.Canceled) {
+	if errors.As(err, &native) {
+		t.Fatalf("raw SDK error leaked through error chain: %#v", native)
+	}
+	if !errors.Is(err, context.Canceled) || errors.Unwrap(detail.Cause) != nil {
 		t.Fatalf("cause = %v", detail.Cause)
 	}
 }
@@ -205,15 +208,18 @@ func TestSDKNetworkErrorIsUnknownOutcome(t *testing.T) {
 	}
 	var detail *sms.SendError
 	var native *tcerr.TencentCloudSDKError
-	if !errors.As(err, &detail) || !errors.As(err, &native) || native.Code != "ClientError.NetworkError" || detail.Cause != native {
-		t.Fatalf("native error = %#v", native)
+	if !errors.As(err, &detail) || detail.Code != "ClientError.NetworkError" {
+		t.Fatalf("detail = %#v", detail)
+	}
+	if errors.As(err, &native) || errors.Unwrap(detail.Cause) != nil {
+		t.Fatalf("native error leaked: %#v", native)
 	}
 }
 
 func TestSendPreservesSDKNetworkErrorDetails(t *testing.T) {
 	native := tcerr.NewTencentCloudSDKError(
 		"ClientError.NetworkError",
-		"failed for +8613812345678",
+		"failed for +8613812345678, +12025550123, Authorization: Bearer secret-token, {\"message\":\"private response body\"}",
 		"request-network",
 	)
 	provider := &Provider{client: &fakeClient{err: native}, appID: "1400000000"}
@@ -226,8 +232,20 @@ func TestSendPreservesSDKNetworkErrorDetails(t *testing.T) {
 	if detail.Kind != sms.KindUnknownOutcome || detail.Code != "ClientError.NetworkError" || detail.RequestID != "request-network" {
 		t.Fatalf("detail = %#v", detail)
 	}
-	if detail.Message != "failed for [recipient]" || detail.Cause != native {
-		t.Fatalf("message = %q, cause = %v", detail.Message, detail.Cause)
+	for _, secret := range []string{"+8613812345678", "+12025550123", "Authorization: Bearer secret-token", `{\"message\":\"private response body\"}`} {
+		if strings.Contains(err.Error(), secret) || strings.Contains(detail.Message, secret) || strings.Contains(errors.Unwrap(err).Error(), secret) {
+			t.Fatalf("public error text leaked %q: error=%q message=%q cause=%q", secret, err, detail.Message, errors.Unwrap(err))
+		}
+	}
+	if !errors.Is(err, native) {
+		t.Fatalf("error does not preserve native identity: %v", err)
+	}
+	var recovered *tcerr.TencentCloudSDKError
+	if errors.As(err, &recovered) {
+		t.Fatalf("raw SDK error leaked through error chain: %#v", recovered)
+	}
+	if detail.Cause == native || errors.Unwrap(detail.Cause) != nil {
+		t.Fatalf("cause = %#v", detail.Cause)
 	}
 }
 
