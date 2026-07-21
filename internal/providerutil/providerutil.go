@@ -159,7 +159,10 @@ type noRedirectTransport struct {
 func (t noRedirectTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	response, err := t.base.RoundTrip(req)
 	if response != nil && response.StatusCode >= http.StatusMultipleChoices && response.StatusCode < http.StatusBadRequest {
-		response.Header.Del("Location")
+		clone := *response
+		clone.Header = response.Header.Clone()
+		clone.Header.Del("Location")
+		response = &clone
 	}
 	return response, err
 }

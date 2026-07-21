@@ -3,6 +3,7 @@ package providerutil
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -59,6 +60,48 @@ func TestNewHTTPClientTimeout(t *testing.T) {
 	}
 }
 
+func TestNoRedirectTransportDoesNotMutateBaseResponse(t *testing.T) {
+	body := http.NoBody
+	baseResponse := &http.Response{
+		StatusCode: http.StatusTemporaryRedirect,
+		Header: http.Header{
+			"Location": []string{"https://redirect.example.test"},
+			"X-Base":   []string{"retained"},
+		},
+		Body: body,
+	}
+	transport := NoRedirectTransport(roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return baseResponse, nil
+	}))
+	req, err := http.NewRequest(http.MethodPost, "https://source.example.test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := transport.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response == baseResponse {
+		t.Fatal("response aliases base response")
+	}
+	if got := response.Header.Get("Location"); got != "" {
+		t.Fatalf("wrapped Location = %q, want empty", got)
+	}
+	if got := response.Header.Get("X-Base"); got != "retained" {
+		t.Fatalf("wrapped X-Base = %q, want retained", got)
+	}
+	if response.Body != body {
+		t.Fatal("wrapped response body identity changed")
+	}
+	if got := baseResponse.Header.Get("Location"); got != "https://redirect.example.test" {
+		t.Fatalf("base Location = %q, want retained redirect", got)
+	}
+	if got := baseResponse.Header.Get("X-Base"); got != "retained" {
+		t.Fatalf("base X-Base = %q, want retained", got)
+	}
+}
+
 func TestUnknownOutcomeHidesAllRawCauseTextWithoutLosingIsMatchability(t *testing.T) {
 	req := request(t, "+8613812345678")
 	raw := &secretTransportError{
@@ -99,6 +142,10 @@ type secretTransportError struct {
 	credential string
 	body       string
 }
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
 func (e *secretTransportError) Error() string {
 	return "transport failed for " + e.recipient + ", " + e.foreign + ", " + e.credential + ", " + e.body
