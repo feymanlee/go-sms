@@ -29,6 +29,31 @@ func classifyBodyCode(code string) sms.ErrorKind {
 }
 
 func classifyError(ctx context.Context, err error, recipient sms.Recipient) error {
+	code, message, requestID, status, sdkError := sdkErrorDetails(err)
+	if sdkError {
+		kind := sms.KindInternal
+		switch {
+		case status == http.StatusUnauthorized, status == http.StatusForbidden,
+			code == "InvalidAccessKeyId.NotFound", code == "SignatureDoesNotMatch":
+			kind = sms.KindAuthentication
+		case status >= http.StatusInternalServerError, isUnavailableCode(code):
+			kind = sms.KindUnavailable
+		}
+		cause := error(nil)
+		if contextErr := ctx.Err(); contextErr != nil {
+			kind = sms.KindUnknownOutcome
+			cause = contextErr
+		}
+		return &sms.SendError{
+			Kind:      kind,
+			Provider:  "aliyun",
+			Code:      code,
+			Message:   providerutil.Sanitize(message, recipient),
+			RequestID: requestID,
+			Cause:     cause,
+		}
+	}
+
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || isNetworkError(err) {
 		return providerutil.UnknownOutcome("aliyun", recipient, err)
 	}
@@ -36,26 +61,7 @@ func classifyError(ctx context.Context, err error, recipient sms.Recipient) erro
 		return providerutil.UnknownOutcome("aliyun", recipient, errors.Join(err, contextErr))
 	}
 
-	code, message, requestID, status, ok := sdkErrorDetails(err)
-	if !ok {
-		return internalError(providerutil.Sanitize(err.Error(), recipient), "", err)
-	}
-	kind := sms.KindInternal
-	switch {
-	case status == http.StatusUnauthorized, status == http.StatusForbidden,
-		code == "InvalidAccessKeyId.NotFound", code == "SignatureDoesNotMatch":
-		kind = sms.KindAuthentication
-	case status >= http.StatusInternalServerError, isUnavailableCode(code):
-		kind = sms.KindUnavailable
-	}
-	return &sms.SendError{
-		Kind:      kind,
-		Provider:  "aliyun",
-		Code:      code,
-		Message:   providerutil.Sanitize(message, recipient),
-		RequestID: requestID,
-		Cause:     err,
-	}
+	return internalError(providerutil.Sanitize(err.Error(), recipient), "", err)
 }
 
 func sdkErrorDetails(err error) (code, message, requestID string, status int, ok bool) {

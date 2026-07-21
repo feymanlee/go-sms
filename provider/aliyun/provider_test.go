@@ -203,8 +203,12 @@ func TestSendClassifiesSDKError(t *testing.T) {
 			})
 			fake := &fakeClient{err: native}
 			_, err := testProvider(fake).Send(context.Background(), testRequest(t))
-			if !errors.Is(err, tt.want) || !errors.Is(err, native) || fake.calls != 1 {
+			if !errors.Is(err, tt.want) || errors.Is(err, native) || fake.calls != 1 {
 				t.Fatalf("error = %v, calls = %d", err, fake.calls)
+			}
+			var sdkError *tea.SDKError
+			if errors.As(err, &sdkError) {
+				t.Fatalf("SDK error leaked through public error chain: %#v", sdkError)
 			}
 			var detail *sms.SendError
 			if !errors.As(err, &detail) || detail.Code != tt.code || detail.Message != "failed for [recipient] and [recipient]" || detail.RequestID != "request-sdk" {
@@ -223,8 +227,32 @@ func TestSendClassifiesDaraSDKError(t *testing.T) {
 	fake := &fakeClient{err: native}
 
 	_, err := testProvider(fake).Send(context.Background(), testRequest(t))
-	if !errors.Is(err, sms.ErrAuthentication) || !errors.Is(err, native) || fake.calls != 1 {
+	if !errors.Is(err, sms.ErrAuthentication) || errors.Is(err, native) || fake.calls != 1 {
 		t.Fatalf("error = %v, calls = %d", err, fake.calls)
+	}
+	var sdkError *dara.SDKError
+	if errors.As(err, &sdkError) {
+		t.Fatalf("SDK error leaked through public error chain: %#v", sdkError)
+	}
+}
+
+func TestSendPreservesContextCancellationWithoutSDKErrorCause(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	native := tea.NewSDKError(map[string]interface{}{
+		"code":       "ClientError",
+		"statusCode": http.StatusBadRequest,
+		"message":    "request failed",
+		"data":       map[string]interface{}{"RequestId": "request-sdk"},
+	})
+	fake := &fakeClient{err: native, beforeReturn: cancel}
+
+	_, err := testProvider(fake).Send(ctx, testRequest(t))
+	if !errors.Is(err, sms.ErrUnknownOutcome) || !errors.Is(err, context.Canceled) || errors.Is(err, native) || fake.calls != 1 {
+		t.Fatalf("error = %v, calls = %d", err, fake.calls)
+	}
+	var sdkError *tea.SDKError
+	if errors.As(err, &sdkError) {
+		t.Fatalf("SDK error leaked through public error chain: %#v", sdkError)
 	}
 }
 
