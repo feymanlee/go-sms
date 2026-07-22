@@ -114,9 +114,13 @@ func (p *Provider) Send(ctx context.Context, req sms.Request) (sms.Submission, e
 
 	requestID := response.Header.Get("X-Reqid")
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return sms.Submission{}, p.failures.Decision(httpErrorCategory(response.StatusCode), failure.Diagnostic{
+		diagnostic := failure.Diagnostic{
 			Code: strconv.Itoa(response.StatusCode), RequestID: requestID,
-		})
+		}
+		if category, ok := httpErrorCategory(response.StatusCode); ok {
+			return sms.Submission{}, p.failures.Decision(category, diagnostic)
+		}
+		return sms.Submission{}, p.failures.Unknown(diagnostic, ctx.Err())
 	}
 
 	var responseBody struct {

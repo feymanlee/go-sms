@@ -136,9 +136,13 @@ func (p *Provider) Send(ctx context.Context, req sms.Request) (sms.Submission, e
 	if code != "OK" {
 		return sms.Submission{}, p.failures.Decision(classifyBodyCode(code), failure.Diagnostic{Code: code, RequestID: requestID})
 	}
+	bizID := dara.StringValue(response.Body.BizId)
+	if bizID == "" {
+		return sms.Submission{}, p.failures.Unknown(failure.Diagnostic{Code: code, RequestID: requestID}, ctx.Err())
+	}
 	return sms.Submission{
 		Provider:  "aliyun",
-		MessageID: dara.StringValue(response.Body.BizId),
+		MessageID: bizID,
 		RequestID: requestID,
 	}, nil
 }

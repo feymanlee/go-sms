@@ -96,6 +96,7 @@ func TestSendUsesDefaultSignature(t *testing.T) {
 }
 
 func TestSendDoesNotFollowRedirects(t *testing.T) {
+	var sourceCalls atomic.Int32
 	var redirects atomic.Int32
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		redirects.Add(1)
@@ -104,15 +105,20 @@ func TestSendDoesNotFollowRedirects(t *testing.T) {
 	defer target.Close()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sourceCalls.Add(1)
+		w.Header().Set("X-Reqid", "request-redirect")
 		w.Header().Set("Location", target.URL)
 		w.WriteHeader(http.StatusTemporaryRedirect)
 	}))
 	defer server.Close()
 
 	_, err := testProvider(t, server.Client(), server.URL).Send(context.Background(), testRequest(t))
-	requireFailure(t, err, failure.Rejected)
-	if redirects.Load() != 0 {
-		t.Fatalf("error = %v, redirects = %d", err, redirects.Load())
+	got := requireFailure(t, err, failure.UnknownOutcome)
+	if details := got.Details(); details.Code != strconv.Itoa(http.StatusTemporaryRedirect) || details.RequestID != "request-redirect" {
+		t.Fatalf("details = %#v", details)
+	}
+	if sourceCalls.Load() != 1 || redirects.Load() != 0 {
+		t.Fatalf("error = %v, source calls = %d, redirects = %d", err, sourceCalls.Load(), redirects.Load())
 	}
 }
 
@@ -143,6 +149,31 @@ func TestSendClassifiesHTTPResponsesAndCapturesRequestID(t *testing.T) {
 				t.Fatalf("details = %#v", details)
 			}
 		})
+	}
+}
+
+func TestSendReturnsUnknownOutcomeForUnclassifiedHTTPStatusWithContextEvidence(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var calls atomic.Int32
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		cancel()
+		return &http.Response{
+			StatusCode: 399,
+			Header:     http.Header{"X-Reqid": []string{"request-unclassified"}},
+			Body:       io.NopCloser(strings.NewReader("unclassified")),
+			Request:    req,
+		}, nil
+	})}
+
+	_, err := testProvider(t, client, "https://example.invalid/v1/message").Send(ctx, testRequest(t))
+	got := requireFailure(t, err, failure.UnknownOutcome)
+	if details := got.Details(); details.Code != "399" || details.RequestID != "request-unclassified" {
+		t.Fatalf("details = %#v", details)
+	}
+	if !errors.Is(err, context.Canceled) || calls.Load() != 1 {
+		t.Fatalf("error = %v, calls = %d", err, calls.Load())
 	}
 }
 

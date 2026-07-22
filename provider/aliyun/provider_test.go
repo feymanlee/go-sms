@@ -167,6 +167,24 @@ func TestSendMapsBusinessLimitControlToRateLimited(t *testing.T) {
 	}
 }
 
+func TestSendReturnsUnknownOutcomeWhenOKResponseLacksBizID(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fake := &fakeClient{
+		response:     response("OK", "OK", "", "request-missing-biz"),
+		beforeReturn: cancel,
+	}
+
+	_, err := testProvider(t, fake).Send(ctx, testRequest(t))
+	got := requireFailure(t, err, failure.UnknownOutcome)
+	if details := got.Details(); details.Code != "OK" || details.RequestID != "request-missing-biz" {
+		t.Fatalf("details = %#v", details)
+	}
+	if !errors.Is(err, context.Canceled) || fake.calls != 1 {
+		t.Fatalf("error = %v, calls = %d", err, fake.calls)
+	}
+}
+
 func TestSendClassifiesBodyCodes(t *testing.T) {
 	tests := []struct {
 		name     string

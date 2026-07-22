@@ -13,7 +13,7 @@ One non-retried request submitted to exactly one Provider. Version 1 does not ro
 _Avoid_: Dispatch, delivery
 
 **Send Failure**:
-An unsuccessful or indeterminate Send Attempt after the request has crossed the Provider seam. Validation, cancellation, or implementation errors before submission are not Send Failures. A Send Failure exposes only safe structured Provider diagnostics.
+An unsuccessful or indeterminate Send Attempt after the request has crossed the Provider seam. Validation, an already-done Context, and other errors before Provider invocation are not Send Failures. An indeterminate cancellation after Provider invocation is a Send Failure classified as Unknown Outcome. A Send Failure exposes only safe structured Provider diagnostics.
 _Avoid_: Provider error, send error
 
 **Failure Category**:

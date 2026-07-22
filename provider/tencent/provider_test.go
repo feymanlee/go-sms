@@ -133,6 +133,26 @@ func TestSendRejectsNonOKStatus(t *testing.T) {
 	}
 }
 
+func TestSendReturnsUnknownOutcomeWhenOkStatusLacksSerialNo(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var calls atomic.Int32
+	provider := newTestProvider(t, apiClientFunc(func(context.Context, *tc.SendSmsRequest) (*tc.SendSmsResponse, error) {
+		calls.Add(1)
+		cancel()
+		return response("Ok", "send success", "", 1, "request-missing-serial"), nil
+	}))
+
+	_, err := provider.Send(ctx, testRequest(t))
+	got := requireFailure(t, err, failure.UnknownOutcome)
+	if details := got.Details(); details.Code != "Ok" || details.RequestID != "request-missing-serial" {
+		t.Fatalf("details = %#v", details)
+	}
+	if !errors.Is(err, context.Canceled) || calls.Load() != 1 {
+		t.Fatalf("error = %v, calls = %d", err, calls.Load())
+	}
+}
+
 func TestSendClassifiesKnownStatusCode(t *testing.T) {
 	tests := []struct {
 		code     string

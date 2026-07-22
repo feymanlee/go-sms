@@ -87,6 +87,7 @@ func TestSendUsesDefaultSignature(t *testing.T) {
 }
 
 func TestSendDoesNotFollowRedirectsOrMutateCallerClient(t *testing.T) {
+	var sourceCalls atomic.Int32
 	var targetCalls atomic.Int32
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		targetCalls.Add(1)
@@ -95,6 +96,7 @@ func TestSendDoesNotFollowRedirectsOrMutateCallerClient(t *testing.T) {
 	defer target.Close()
 
 	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sourceCalls.Add(1)
 		w.Header().Set("Location", target.URL)
 		w.WriteHeader(http.StatusTemporaryRedirect)
 	}))
@@ -107,9 +109,13 @@ func TestSendDoesNotFollowRedirectsOrMutateCallerClient(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, _ = provider.Send(context.Background(), testRequest(t))
-	if got := targetCalls.Load(); got != 0 {
-		t.Fatalf("redirect target calls = %d, want 0", got)
+	_, sendErr := provider.Send(context.Background(), testRequest(t))
+	got := requireFailure(t, sendErr, failure.UnknownOutcome)
+	if details := got.Details(); details.Code != strconv.Itoa(http.StatusTemporaryRedirect) {
+		t.Fatalf("details = %#v", details)
+	}
+	if sourceCalls.Load() != 1 || targetCalls.Load() != 0 {
+		t.Fatalf("source calls = %d, redirect target calls = %d", sourceCalls.Load(), targetCalls.Load())
 	}
 	if callerClient.CheckRedirect == nil {
 		t.Fatal("caller client CheckRedirect was mutated")
@@ -145,6 +151,35 @@ func TestSendClassifiesHTTPResponses(t *testing.T) {
 				t.Fatalf("details=%#v", details)
 			}
 		})
+	}
+}
+
+func TestSendReturnsUnknownOutcomeForUnclassifiedHTTPStatusWithContextEvidence(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var calls atomic.Int32
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		cancel()
+		return &http.Response{
+			StatusCode: 399,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("unclassified")),
+			Request:    req,
+		}, nil
+	})}
+	provider, err := New(testConfig(), WithHTTPClient(client), WithEndpoint("https://example.invalid"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = provider.Send(ctx, testRequest(t))
+	got := requireFailure(t, err, failure.UnknownOutcome)
+	if details := got.Details(); details.Code != "399" {
+		t.Fatalf("details = %#v", details)
+	}
+	if !errors.Is(err, context.Canceled) || calls.Load() != 1 {
+		t.Fatalf("error = %v, calls = %d", err, calls.Load())
 	}
 }
 

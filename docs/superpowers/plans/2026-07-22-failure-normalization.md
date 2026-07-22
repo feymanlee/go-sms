@@ -295,7 +295,7 @@ func requireFailure(t *testing.T, err error, category failure.Category) failure.
 }
 ```
 
-Use the helper in the existing HTTP-status, Provider-body, malformed-response, and transport tests. HTTP 401/403, 429, other 4xx, and 5xx must assert Authentication, RateLimited, Rejected, and Unavailable respectively and retain the decimal HTTP status as `Details().Code`. A nonzero RetCode must assert Rejected and retain its decimal code. Nil response, decode failure, trailing JSON, missing RetCode, and missing SessionNo must assert UnknownOutcome. The transport test must assert `!errors.Is(err, transportErr)`; cancellation and deadline rows must still assert their matching Context sentinel.
+Use the helper in the existing HTTP-status, Provider-body, malformed-response, and transport tests. HTTP 401/403, 429, other 4xx, and 5xx must assert Authentication, RateLimited, Rejected, and Unavailable respectively and retain the decimal HTTP status as `Details().Code`. An unclassified non-2xx status such as a 3xx redirect must assert UnknownOutcome while retaining its decimal status Code and any `ctx.Err()` evidence. A nonzero RetCode must assert Rejected and retain its decimal code. Nil response, decode failure, trailing JSON, missing RetCode, and missing SessionNo must assert UnknownOutcome. The transport test must assert `!errors.Is(err, transportErr)`; cancellation and deadline rows must still assert their matching Context sentinel.
 
 - [ ] **Step 2: Run UCloud tests and verify RED**
 
@@ -316,9 +316,11 @@ if err != nil { return nil, err }
 return sms.Submission{}, p.failures.Unknown(failure.Diagnostic{}, errors.Join(err, ctx.Err()))
 
 // explicit non-2xx
-return sms.Submission{}, p.failures.Decision(httpErrorCategory(response.StatusCode), failure.Diagnostic{
-    Code: strconv.Itoa(response.StatusCode),
-})
+diagnostic := failure.Diagnostic{Code: strconv.Itoa(response.StatusCode)}
+if category, ok := httpErrorCategory(response.StatusCode); ok {
+    return sms.Submission{}, p.failures.Decision(category, diagnostic)
+}
+return sms.Submission{}, p.failures.Unknown(diagnostic, ctx.Err())
 
 // explicit nonzero RetCode
 return sms.Submission{}, p.failures.Decision(failure.Rejected, failure.Diagnostic{Code: strconv.Itoa(*body.RetCode)})
@@ -327,7 +329,7 @@ return sms.Submission{}, p.failures.Decision(failure.Rejected, failure.Diagnosti
 return sms.Submission{}, p.failures.Unknown(failure.Diagnostic{}, ctx.Err())
 ```
 
-Rename `httpErrorKind` to `httpErrorCategory` and return `failure.Category` using the normative matrix. Remove `providerRejection`, `providerErrorMessage`, and `internalError`. Replace the pre-invocation request-construction branch with `errors.New("ucloud: cannot create request")`; leave phone conversion on the legacy preflight path until Task 7.
+Rename `httpErrorKind` to `httpErrorCategory` and return `(failure.Category, bool)` using the normative matrix: only 401/403, 429, other 4xx, and 5xx return a decision. Remove `providerRejection`, `providerErrorMessage`, and `internalError`. Replace the pre-invocation request-construction branch with `errors.New("ucloud: cannot create request")`; leave phone conversion on the legacy preflight path until Task 7.
 
 - [ ] **Step 4: Verify UCloud and full compatibility**
 
@@ -357,7 +359,7 @@ git commit -m "refactor(ucloud): normalize Send Failures"
 
 - [ ] **Step 1: Write failing Qiniu Failure-interface tests**
 
-Add the exact `requireFailure` helper from Task 2. Apply it to the existing HTTP-status, malformed-response, and transport tests. HTTP 401/403, 429, other 4xx, and 5xx must assert the matrix category, decimal status Code, and `X-Reqid`. Nil response, decode failure, trailing JSON, and missing JobID must assert UnknownOutcome while preserving a valid `X-Reqid`. The transport test must assert `!errors.Is(err, transportErr)`; cancellation and deadline rows must still match their Context sentinel.
+Add the exact `requireFailure` helper from Task 2. Apply it to the existing HTTP-status, malformed-response, and transport tests. HTTP 401/403, 429, other 4xx, and 5xx must assert the matrix category, decimal status Code, and `X-Reqid`. An unclassified non-2xx status such as a 3xx redirect must assert UnknownOutcome while retaining its decimal status Code, `X-Reqid`, and any `ctx.Err()` evidence. Nil response, decode failure, trailing JSON, and missing JobID must assert UnknownOutcome while preserving a valid `X-Reqid`. The transport test must assert `!errors.Is(err, transportErr)`; cancellation and deadline rows must still match their Context sentinel.
 
 - [ ] **Step 2: Run Qiniu tests and verify RED**
 
@@ -375,14 +377,18 @@ if err != nil { return nil, err }
 
 return sms.Submission{}, p.failures.Unknown(failure.Diagnostic{}, errors.Join(err, ctx.Err()))
 
-return sms.Submission{}, p.failures.Decision(httpErrorCategory(response.StatusCode), failure.Diagnostic{
+diagnostic := failure.Diagnostic{
     Code: strconv.Itoa(response.StatusCode), RequestID: requestID,
-})
+}
+if category, ok := httpErrorCategory(response.StatusCode); ok {
+    return sms.Submission{}, p.failures.Decision(category, diagnostic)
+}
+return sms.Submission{}, p.failures.Unknown(diagnostic, ctx.Err())
 
 return sms.Submission{}, p.failures.Unknown(failure.Diagnostic{RequestID: requestID}, ctx.Err())
 ```
 
-Add `failures failure.Factory` to `Provider` and store the validated `failure.NewFactory("qiniu")` result in `New`. Keep HMAC signing, request bytes, response RequestID extraction, and Provider acceptance mapping unchanged. Rename `httpErrorKind` to `httpErrorCategory`, return `failure.Category`, and delete `providerError`, `internalError`, and `non2xxMessage`. Replace the two pre-invocation branches with `errors.New("qiniu: cannot encode request")` and `errors.New("qiniu: cannot create request")`; leave phone conversion on the legacy preflight path until Task 7.
+Add `failures failure.Factory` to `Provider` and store the validated `failure.NewFactory("qiniu")` result in `New`. Keep HMAC signing, request bytes, response RequestID extraction, and Provider acceptance mapping unchanged. Rename `httpErrorKind` to `httpErrorCategory`, return `(failure.Category, bool)`, and report a decision only for 401/403, 429, other 4xx, and 5xx. Delete `providerError`, `internalError`, and `non2xxMessage`. Replace the two pre-invocation branches with `errors.New("qiniu: cannot encode request")` and `errors.New("qiniu: cannot create request")`; leave phone conversion on the legacy preflight path until Task 7.
 
 - [ ] **Step 4: Verify Qiniu and full compatibility**
 
@@ -412,7 +418,7 @@ git commit -m "refactor(qiniu): normalize Send Failures"
 
 - [ ] **Step 1: Write failing Yunpian Failure-interface tests**
 
-Add the exact `requireFailure` helper from Task 2. HTTP 401/403, 429, other 4xx, and 5xx must assert the matrix category and decimal status Code. Every nonzero body Code must assert Rejected; valid body Codes are preserved, while invalid negative Codes are omitted by shared diagnostic validation. Nil response, decode failure, trailing JSON, missing Code, and missing SID must assert UnknownOutcome. Empty parameter values, pre-canceled Context, and request-construction failures must assert `failure.From(err)` is false. The transport test must assert `!errors.Is(err, transportErr)` while cancellation and deadline rows still match their Context sentinel.
+Add the exact `requireFailure` helper from Task 2. HTTP 401/403, 429, other 4xx, and 5xx must assert the matrix category and decimal status Code. An unclassified non-2xx status such as a 3xx redirect must assert UnknownOutcome while retaining its decimal status Code and any `ctx.Err()` evidence. Every nonzero body Code must assert Rejected; valid body Codes are preserved, while invalid negative Codes are omitted by shared diagnostic validation. Nil response, decode failure, trailing JSON, missing Code, and missing SID must assert UnknownOutcome. Empty parameter values, pre-canceled Context, and request-construction failures must assert `failure.From(err)` is false. The transport test must assert `!errors.Is(err, transportErr)` while cancellation and deadline rows still match their Context sentinel.
 
 - [ ] **Step 2: Run Yunpian tests and verify RED**
 
@@ -422,7 +428,7 @@ Expected: FAIL against the old error model.
 
 - [ ] **Step 3: Bind the factory and migrate the implementation**
 
-Add `failures failure.Factory` to `Provider` and store the validated `failure.NewFactory("yunpian")` result in `New`. Use `Decision(httpErrorCategory(...), Diagnostic{Code: strconv.Itoa(status)})`, `Decision(failure.Rejected, Diagnostic{Code: body.Code.String()})`, and `Unknown(Diagnostic{}, ctx.Err())` for every nil/decode/trailing/missing-field response. Use `Unknown(Diagnostic{}, errors.Join(err, ctx.Err()))` for transport errors. Rename `httpErrorKind` to `httpErrorCategory`; delete both message constants and `internalError`. Return `errors.New("yunpian: template parameter value is required")` and `errors.New("yunpian: cannot create request")` on their pre-invocation branches.
+Add `failures failure.Factory` to `Provider` and store the validated `failure.NewFactory("yunpian")` result in `New`. Make `httpErrorCategory` return `(failure.Category, bool)` and call `Decision(category, diagnostic)` only for 401/403, 429, other 4xx, and 5xx; call `Unknown(diagnostic, ctx.Err())` for every other non-2xx status. Use `Decision(failure.Rejected, Diagnostic{Code: body.Code.String()})` for explicit body rejection, and `Unknown(Diagnostic{}, ctx.Err())` for every nil/decode/trailing/missing-field response. Use `Unknown(Diagnostic{}, errors.Join(err, ctx.Err()))` for transport errors. Delete both message constants and `internalError`. Return `errors.New("yunpian: template parameter value is required")` and `errors.New("yunpian: cannot create request")` on their pre-invocation branches.
 
 - [ ] **Step 4: Verify Yunpian and full compatibility**
 
@@ -461,7 +467,7 @@ if details := got.Details(); details.Code != "RequestLimitExceeded" || details.R
 }
 ```
 
-Add the exact `requireFailure` helper from Task 2. Body codes use `classifyStatusCode`: documented authentication, throttling, and unavailable prefixes keep those categories; every other explicit non-`Ok` body code is Rejected. SDK errors use `classifyCode`: documented prefixes are decisions, while `ClientError.NetworkError` and every unknown SDK code are UnknownOutcome. Nil response, nil response body, zero/multiple/nil status rows, and missing status Code are UnknownOutcome. Valid Code/RequestID survive; native identity and `*TencentCloudSDKError` must not be recoverable. Add a canceled-Context row carrying a known authentication SDK code and assert Authentication with no Context match.
+Add the exact `requireFailure` helper from Task 2. Body codes use `classifyStatusCode`: documented authentication, throttling, and unavailable prefixes keep those categories; every other explicit non-`Ok` body code is Rejected. SDK errors use `classifyCode`: documented prefixes are decisions, while `ClientError.NetworkError` and every unknown SDK code are UnknownOutcome. Nil response, nil response body, zero/multiple/nil status rows, missing status Code, and an `Ok` status with an empty `SerialNo` are UnknownOutcome. Valid Code/RequestID survive; the missing-`SerialNo` row must preserve RequestID and any `ctx.Err()` evidence. Native identity and `*TencentCloudSDKError` must not be recoverable. Add a canceled-Context row carrying a known authentication SDK code and assert Authentication with no Context match.
 
 - [ ] **Step 2: Run Tencent tests and verify RED**
 
@@ -489,7 +495,7 @@ func classifyError(ctx context.Context, failures failure.Factory, err error) err
 }
 ```
 
-Make `classifyCode(string) (failure.Category, bool)` preserve the existing documented prefix groups and return `("", false)` otherwise. Make `classifyStatusCode(string) failure.Category` return a known category or Rejected. In `Send`, use `p.failures.Decision(classifyStatusCode(code), Diagnostic{Code: code, RequestID: requestID})` for non-`Ok` body codes and `p.failures.Unknown(Diagnostic{RequestID: requestID}, ctx.Err())` for malformed responses. Delete Provider message constants, network helper functions, opaque causes, and `internalError`.
+Make `classifyCode(string) (failure.Category, bool)` preserve the existing documented prefix groups and return `("", false)` otherwise. Make `classifyStatusCode(string) failure.Category` return a known category or Rejected. In `Send`, use `p.failures.Decision(classifyStatusCode(code), Diagnostic{Code: code, RequestID: requestID})` for non-`Ok` body codes. After that explicit-decision branch, require a nonempty `SerialNo`; otherwise use `p.failures.Unknown(Diagnostic{Code: code, RequestID: requestID}, ctx.Err())`. Use `p.failures.Unknown(Diagnostic{RequestID: requestID}, ctx.Err())` for other malformed responses. Delete Provider message constants, network helper functions, opaque causes, and `internalError`.
 
 - [ ] **Step 4: Verify Tencent and full compatibility**
 
@@ -519,7 +525,7 @@ git commit -m "refactor(tencent): normalize Send Failures"
 
 - [ ] **Step 1: Write failing Alibaba normalization tests**
 
-Add the exact `requireFailure` helper from Task 2. Body responses use `classifyBodyCode`: known authentication/throttling/unavailable codes keep those categories and every other explicit non-`OK` code is Rejected. SDK rows assert, in order, HTTP 429 RateLimited; HTTP 401/403 Authentication; HTTP 5xx Unavailable; documented native code category; other HTTP 4xx Rejected; and no decision for all other status/code pairs. Preserve the existing HTTP-429-plus-auth-code regression row and expect RateLimited. Network/Context/non-SDK errors, undecidable SDK errors, nil response/body, and missing body Code become UnknownOutcome. Native SDK identity and type are unrecoverable. Add a canceled-Context row with HTTP 429 and assert RateLimited with no Context match.
+Add the exact `requireFailure` helper from Task 2. Body responses use `classifyBodyCode`: known authentication/throttling/unavailable codes keep those categories and every other explicit non-`OK` code is Rejected. SDK rows assert, in order, HTTP 429 RateLimited; HTTP 401/403 Authentication; HTTP 5xx Unavailable; documented native code category; other HTTP 4xx Rejected; and no decision for all other status/code pairs. Preserve the existing HTTP-429-plus-auth-code regression row and expect RateLimited. Network/Context/non-SDK errors, undecidable SDK errors, nil response/body, missing body Code, and an `OK` body with an empty `BizId` become UnknownOutcome. The missing-`BizId` row preserves RequestID and any `ctx.Err()` evidence. Native SDK identity and type are unrecoverable. Add a canceled-Context row with HTTP 429 and assert RateLimited with no Context match.
 
 - [ ] **Step 2: Run Alibaba tests and verify RED**
 
@@ -551,7 +557,7 @@ func classifySDKDecision(status int, code string) (failure.Category, bool) {
 }
 ```
 
-`classifyKnownCode` returns a category and true only for the current authentication, throttling, and unavailable code sets. `classifyBodyCode` uses it and defaults to Rejected. `classifyError` extracts diagnostics, calls `Decision` only when `classifySDKDecision` succeeds, and otherwise calls `Unknown(diagnostic, errors.Join(err, ctx.Err()))`; non-SDK errors always call `Unknown` with empty diagnostics. A non-`OK` body response uses `Decision`; nil/malformed responses use `Unknown` with any safe RequestID. Replace the pre-invocation JSON branch with `errors.New("aliyun: cannot encode template parameters")`; delete message constants, network helpers, opaque causes, and `internalError`.
+`classifyKnownCode` returns a category and true only for the current authentication, throttling, and unavailable code sets. `classifyBodyCode` uses it and defaults to Rejected. `classifyError` extracts diagnostics, calls `Decision` only when `classifySDKDecision` succeeds, and otherwise calls `Unknown(diagnostic, errors.Join(err, ctx.Err()))`; non-SDK errors always call `Unknown` with empty diagnostics. A non-`OK` body response uses `Decision`. After that explicit-decision branch, require a nonempty `BizId`; otherwise use `Unknown(Diagnostic{Code: code, RequestID: requestID}, ctx.Err())`. Other nil/malformed responses use `Unknown` with any safe RequestID. Replace the pre-invocation JSON branch with `errors.New("aliyun: cannot encode template parameters")`; delete message constants, network helpers, opaque causes, and `internalError`.
 
 - [ ] **Step 4: Verify Alibaba and full compatibility**
 
@@ -694,6 +700,8 @@ if err != nil {
         log.Printf("SMS Send Attempt failed: category=%s provider=%s code=%s request_id=%s",
             got.Category(), details.Provider, details.Code, details.RequestID)
         if got.UnknownOutcome() { log.Print("reconcile before retry") }
+    } else {
+        log.Print(err)
     }
     return
 }

@@ -6,15 +6,17 @@ import (
 	"github.com/feymanlee/go-sms/failure"
 )
 
-func httpErrorCategory(status int) failure.Category {
+func httpErrorCategory(status int) (failure.Category, bool) {
 	switch {
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:
-		return failure.Authentication
+		return failure.Authentication, true
 	case status == http.StatusTooManyRequests:
-		return failure.RateLimited
+		return failure.RateLimited, true
+	case status >= http.StatusBadRequest && status <= 499:
+		return failure.Rejected, true
 	case status >= http.StatusInternalServerError && status <= 599:
-		return failure.Unavailable
+		return failure.Unavailable, true
 	default:
-		return failure.Rejected
+		return "", false
 	}
 }

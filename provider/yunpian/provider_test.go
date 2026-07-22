@@ -105,6 +105,7 @@ func TestSendPreservesLargeNumericSID(t *testing.T) {
 }
 
 func TestSendDoesNotFollowRedirects(t *testing.T) {
+	var sourceCalls atomic.Int32
 	var targetCalls atomic.Int32
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		targetCalls.Add(1)
@@ -112,15 +113,19 @@ func TestSendDoesNotFollowRedirects(t *testing.T) {
 	}))
 	defer target.Close()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sourceCalls.Add(1)
 		w.Header().Set("Location", target.URL)
 		w.WriteHeader(http.StatusTemporaryRedirect)
 	}))
 	defer server.Close()
 
 	_, err := testProvider(t, server.Client(), server.URL).Send(context.Background(), testRequest(t))
-	requireFailure(t, err, failure.Rejected)
-	if targetCalls.Load() != 0 {
-		t.Fatalf("error = %v, target calls = %d", err, targetCalls.Load())
+	got := requireFailure(t, err, failure.UnknownOutcome)
+	if details := got.Details(); details.Code != strconv.Itoa(http.StatusTemporaryRedirect) {
+		t.Fatalf("details = %#v", details)
+	}
+	if sourceCalls.Load() != 1 || targetCalls.Load() != 0 {
+		t.Fatalf("error = %v, source calls = %d, target calls = %d", err, sourceCalls.Load(), targetCalls.Load())
 	}
 }
 
@@ -186,6 +191,31 @@ func TestSendClassifiesHTTPResponses(t *testing.T) {
 				t.Fatalf("details = %#v", details)
 			}
 		})
+	}
+}
+
+func TestSendReturnsUnknownOutcomeForUnclassifiedHTTPStatusWithContextEvidence(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var calls atomic.Int32
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		cancel()
+		return &http.Response{
+			StatusCode: 399,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("unclassified")),
+			Request:    req,
+		}, nil
+	})}
+
+	_, err := testProvider(t, client, "https://example.invalid").Send(ctx, testRequest(t))
+	got := requireFailure(t, err, failure.UnknownOutcome)
+	if details := got.Details(); details.Code != "399" {
+		t.Fatalf("details = %#v", details)
+	}
+	if !errors.Is(err, context.Canceled) || calls.Load() != 1 {
+		t.Fatalf("error = %v, calls = %d", err, calls.Load())
 	}
 }
 

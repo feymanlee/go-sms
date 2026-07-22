@@ -136,6 +136,10 @@ func (p *Provider) Send(ctx context.Context, req sms.Request) (sms.Submission, e
 	if code != "Ok" {
 		return sms.Submission{}, p.failures.Decision(classifyStatusCode(code), failure.Diagnostic{Code: code, RequestID: requestID})
 	}
+	serialNo := stringValue(status.SerialNo)
+	if serialNo == "" {
+		return sms.Submission{}, p.failures.Unknown(failure.Diagnostic{Code: code, RequestID: requestID}, ctx.Err())
+	}
 	var metadata map[string]string
 	if status.Fee != nil {
 		metadata = map[string]string{"fee": strconv.FormatUint(*status.Fee, 10)}
@@ -143,7 +147,7 @@ func (p *Provider) Send(ctx context.Context, req sms.Request) (sms.Submission, e
 
 	return sms.Submission{
 		Provider:  "tencent",
-		MessageID: stringValue(status.SerialNo),
+		MessageID: serialNo,
 		RequestID: requestID,
 		Metadata:  metadata,
 	}, nil

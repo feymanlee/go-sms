@@ -46,6 +46,8 @@ func ExampleSender() {
 			if got.UnknownOutcome() {
 				log.Print("reconcile before retry")
 			}
+		} else {
+			log.Print(err)
 		}
 		return
 	}
