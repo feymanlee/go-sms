@@ -72,7 +72,7 @@ type Submission struct {
 
 `SignatureRef` 是 Provider 原生签名引用，而不是统一的签名 ID。腾讯、阿里和 UCloud 分别使用签名内容或名称，七牛使用签名 ID，云片模板发送不使用该字段。空值表示使用 Provider 构造配置中的默认值；非空发送级值覆盖默认值。
 
-`Submission` 仅表示 Provider 明确接受了请求，不表示短信已经到达 Recipient。`MessageID` 和 `RequestID` 在 Provider 不返回对应信息时允许为空。`Metadata` 只保存有诊断或业务价值、但无稳定跨 Provider 含义的字符串字段，不保存官方 SDK 对象或完整原始响应。
+`Submission` 仅表示 Provider 明确接受了请求，不表示短信已经到达 Recipient。`MessageID` 是必需的 Provider 接受证据；Provider 调用后缺少 `MessageID` 时必须返回 `UnknownOutcome`，不能返回 `Submission`。只有 `RequestID` 在 Provider 不返回对应信息时允许为空。`Metadata` 只保存有诊断或业务价值、但无稳定跨 Provider 含义的字符串字段，不保存官方 SDK 对象或完整原始响应。
 
 ## Provider 构造
 

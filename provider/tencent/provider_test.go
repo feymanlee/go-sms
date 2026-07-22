@@ -153,6 +153,41 @@ func TestSendReturnsUnknownOutcomeWhenOkStatusLacksSerialNo(t *testing.T) {
 	}
 }
 
+func TestSendReturnsUnknownOutcomeWhenOkStatusLacksSerialNoWithoutContextError(t *testing.T) {
+	fake := &fakeClient{response: response("Ok", "send success", "", 1, "request-missing-serial-background")}
+
+	_, err := newTestProvider(t, fake).Send(context.Background(), testRequest(t))
+	got := requireFailure(t, err, failure.UnknownOutcome)
+	if details := got.Details(); details.Code != "Ok" || details.RequestID != "request-missing-serial-background" {
+		t.Fatalf("details = %#v", details)
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || fake.calls != 1 {
+		t.Fatalf("error = %v, calls = %d", err, fake.calls)
+	}
+}
+
+func TestSendReturnsAcceptedSubmissionWhenContextIsCanceledDuringInvocation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var calls atomic.Int32
+	provider := newTestProvider(t, apiClientFunc(func(context.Context, *tc.SendSmsRequest) (*tc.SendSmsResponse, error) {
+		calls.Add(1)
+		cancel()
+		return response("Ok", "send success", "serial-accepted", 1, "request-accepted"), nil
+	}))
+
+	submission, err := provider.Send(ctx, testRequest(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ctx.Err() != context.Canceled || calls.Load() != 1 {
+		t.Fatalf("Context error = %v, calls = %d", ctx.Err(), calls.Load())
+	}
+	if submission.Provider != "tencent" || submission.MessageID != "serial-accepted" || submission.RequestID != "request-accepted" {
+		t.Fatalf("submission = %#v", submission)
+	}
+}
+
 func TestSendClassifiesKnownStatusCode(t *testing.T) {
 	tests := []struct {
 		code     string

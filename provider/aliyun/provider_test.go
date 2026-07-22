@@ -185,6 +185,39 @@ func TestSendReturnsUnknownOutcomeWhenOKResponseLacksBizID(t *testing.T) {
 	}
 }
 
+func TestSendReturnsUnknownOutcomeWhenOKResponseLacksBizIDWithoutContextError(t *testing.T) {
+	fake := &fakeClient{response: response("OK", "OK", "", "request-missing-biz-background")}
+
+	_, err := testProvider(t, fake).Send(context.Background(), testRequest(t))
+	got := requireFailure(t, err, failure.UnknownOutcome)
+	if details := got.Details(); details.Code != "OK" || details.RequestID != "request-missing-biz-background" {
+		t.Fatalf("details = %#v", details)
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || fake.calls != 1 {
+		t.Fatalf("error = %v, calls = %d", err, fake.calls)
+	}
+}
+
+func TestSendReturnsAcceptedSubmissionWhenContextIsCanceledDuringInvocation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fake := &fakeClient{
+		response:     response("OK", "OK", "biz-accepted", "request-accepted"),
+		beforeReturn: cancel,
+	}
+
+	submission, err := testProvider(t, fake).Send(ctx, testRequest(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ctx.Err() != context.Canceled || fake.calls != 1 {
+		t.Fatalf("Context error = %v, calls = %d", ctx.Err(), fake.calls)
+	}
+	if submission.Provider != "aliyun" || submission.MessageID != "biz-accepted" || submission.RequestID != "request-accepted" {
+		t.Fatalf("submission = %#v", submission)
+	}
+}
+
 func TestSendClassifiesBodyCodes(t *testing.T) {
 	tests := []struct {
 		name     string
