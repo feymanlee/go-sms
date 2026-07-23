@@ -113,7 +113,7 @@ A Failure exposes only safe structured diagnostics. `Details()` may contain Prov
 
 - Each Send Attempt targets exactly one explicitly selected Provider.
 - The library does not automatically retry, follow redirects, route, or fail over.
-- Provider instances are safe for concurrent use under the repository race tests.
+- Provider configuration remains immutable after construction, and CI runs the test suite with the race detector.
 - Default HTTP clients use bounded timeouts and Go standard proxy discovery.
 - A `Submission` proves Provider acceptance, not final SMS delivery.
 

@@ -113,7 +113,7 @@ Failure 只暴露安全的结构化诊断。`Details()` 可以包含 Provider、
 
 - 每次 Send Attempt 只面向一个由调用方显式选择的 Provider。
 - 库不会自动重试、跟随重定向、路由或故障转移。
-- 在仓库 race 测试覆盖下，Provider 实例可安全并发使用。
+- Provider 配置在构造后保持不可变，CI 使用 race detector 运行测试套件。
 - 默认 HTTP 客户端使用有界超时和 Go 标准代理发现。
 - `Submission` 证明 Provider 已接受请求，不代表短信最终送达。
 

@@ -83,7 +83,7 @@ State the version-one operational guarantees:
 
 - Exactly one Provider is chosen explicitly per Send Attempt.
 - No automatic retries, redirect following, routing, or failover.
-- Providers are safe for concurrent use under the documented tests.
+- Provider configuration remains immutable after construction, and CI runs the test suite with the race detector; do not claim shared-instance concurrency coverage for all five Providers.
 - Default HTTP clients retain standard proxy discovery and bounded timeouts.
 - A Submission is acceptance evidence, not a delivery receipt.
 

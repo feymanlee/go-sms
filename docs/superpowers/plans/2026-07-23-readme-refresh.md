@@ -16,6 +16,7 @@
 - The prerelease note says Go 1.25 and Go 1.26 CI passed and credential-gated live SMS verification for all five Providers is not complete.
 - Do not imply production readiness or claim live Provider verification passed.
 - The Provider signature policies are Tencent required, Alibaba required, UCloud optional, Qiniu required, and Yunpian not used.
+- Both files state that Provider configuration remains immutable after construction and CI runs the test suite with the race detector; neither claims shared-instance concurrency coverage for all five Providers.
 - The quick-start Go block is byte-for-byte identical in both files and remains equivalent to `example_test.go`.
 - Do not change production Go files, Provider behavior, dependencies, tags, or releases. Do not send live SMS messages.
 
@@ -171,7 +172,7 @@ A Failure exposes only safe structured diagnostics. `Details()` may contain Prov
 
 - Each Send Attempt targets exactly one explicitly selected Provider.
 - The library does not automatically retry, follow redirects, route, or fail over.
-- Provider instances are safe for concurrent use under the repository race tests.
+- Provider configuration remains immutable after construction, and CI runs the test suite with the race detector.
 - Default HTTP clients use bounded timeouts and Go standard proxy discovery.
 - A `Submission` proves Provider acceptance, not final SMS delivery.
 
@@ -315,7 +316,7 @@ Failure 只暴露安全的结构化诊断。`Details()` 可以包含 Provider、
 
 - 每次 Send Attempt 只面向一个由调用方显式选择的 Provider。
 - 库不会自动重试、跟随重定向、路由或故障转移。
-- 在仓库 race 测试覆盖下，Provider 实例可安全并发使用。
+- Provider 配置在构造后保持不可变，CI 使用 race detector 运行测试套件。
 - 默认 HTTP 客户端使用有界超时和 Go 标准代理发现。
 - `Submission` 证明 Provider 已接受请求，不代表短信最终送达。
 
@@ -415,5 +416,6 @@ Expected: one documentation-only commit containing the synchronized README pair 
 - [x] The English and Chinese target documents have matching section counts, tables, code fences, URLs, versions, categories, and status claims.
 - [x] The three badge image and target URLs are exact and verifiable.
 - [x] The Provider fields and Signature Reference policies match the current adapters.
+- [x] The operational guarantee is evidence-bounded: immutable Provider configuration and race-detector CI, without claiming shared-instance concurrency coverage for all five Providers.
 - [x] No placeholder, roadmap commitment, production change, new release, or live send is included.
 - [x] Every verification command is executable from the repository root.
