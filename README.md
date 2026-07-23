@@ -1,18 +1,25 @@
 # go-sms
 
-`go-sms` provides one common Go contract for sending a Provider-native
-template SMS through Tencent Cloud, Alibaba Cloud, UCloud, Qiniu Cloud, or
-Yunpian. The caller explicitly chooses a Provider for each send attempt.
+[English](README.md) | [简体中文](README_zh.md)
+
+[![CI](https://github.com/feymanlee/go-sms/actions/workflows/ci.yml/badge.svg)](https://github.com/feymanlee/go-sms/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/feymanlee/go-sms.svg)](https://pkg.go.dev/github.com/feymanlee/go-sms)
+[![Release](https://img.shields.io/github/v/release/feymanlee/go-sms?include_prereleases&sort=semver)](https://github.com/feymanlee/go-sms/releases)
+
+`go-sms` provides one Go contract for sending Provider-native template SMS messages through Tencent Cloud, Alibaba Cloud, UCloud, Qiniu Cloud, or Yunpian. The caller explicitly chooses one Provider for each Send Attempt.
+
+> [!WARNING]
+> `v0.1.0` is a prerelease. It passes CI on Go 1.25 and Go 1.26, including race tests, but credential-gated live SMS verification has not yet been completed for all five Providers. Verify each configured Provider in an approved environment before production use.
 
 ## Installation
 
 ```sh
-go get github.com/feymanlee/go-sms
+go get github.com/feymanlee/go-sms@v0.1.0
 ```
 
 The module requires Go 1.25 or later.
 
-## Sending with Tencent Cloud
+## Quick start
 
 ```go
 package main
@@ -76,74 +83,55 @@ func main() {
 }
 ```
 
-`Submission` proves only that the selected Provider accepted the send attempt;
-it is not a delivery receipt. Template parameters retain both their names and
-slice order. A request-level `SignatureRef` overrides the configured default.
+`Submission` is evidence that the selected Provider accepted the Send Attempt; it is not a delivery receipt. Template parameters preserve both their names and slice order. A request-level `SignatureRef` overrides the configured default.
 
-The same example is compile-checked in `example_test.go`. It has no expected
-output declaration, so ordinary `go test` runs compile it without sending an
-SMS.
+The same example is compile-checked in [`example_test.go`](example_test.go). It has no expected output declaration, so ordinary tests compile it without sending an SMS.
 
-## Provider construction
+## Supported Providers
 
-All constructors return `(*Provider, error)` and accept optional
-`WithHTTPClient` and `WithEndpoint` options. The other Providers use these
-exact `Config` fields:
+| Provider | Import path | Required constructor fields | Signature Reference |
+|---|---|---|---|
+| Tencent Cloud | `github.com/feymanlee/go-sms/provider/tencent` | `SecretID`, `SecretKey`, `SMSAppID`, `Region` | Required |
+| Alibaba Cloud | `github.com/feymanlee/go-sms/provider/aliyun` | `AccessKeyID`, `AccessKeySecret`, `Region` | Required |
+| UCloud | `github.com/feymanlee/go-sms/provider/ucloud` | `PublicKey`, `PrivateKey`, `ProjectID`, `Region` | Optional |
+| Qiniu Cloud | `github.com/feymanlee/go-sms/provider/qiniu` | `AccessKey`, `SecretKey` | Required |
+| Yunpian | `github.com/feymanlee/go-sms/provider/yunpian` | `APIKey` | Not used |
 
-| Provider | Package | Construction fields |
-|---|---|---|
-| Alibaba Cloud | `provider/aliyun` | `AccessKeyID`, `AccessKeySecret`, `Region`, optional `DefaultSignatureRef` |
-| UCloud | `provider/ucloud` | `PublicKey`, `PrivateKey`, `ProjectID`, `Region`, optional `DefaultSignatureRef` |
-| Qiniu Cloud | `provider/qiniu` | `AccessKey`, `SecretKey`, optional `DefaultSignatureRef` |
-| Yunpian | `provider/yunpian` | `APIKey` |
+All constructors return `(*Provider, error)` and accept `WithHTTPClient` and `WithEndpoint` options. Tencent Cloud and Alibaba Cloud pass custom endpoints to their official SDKs, so the value is a host without a URL scheme or path. UCloud, Qiniu Cloud, and Yunpian use direct HTTP and require an absolute `http://` or `https://` URL; Qiniu and Yunpian endpoints include the send API path.
 
-`WithEndpoint` syntax is Provider-specific. Tencent Cloud and Alibaba Cloud
-pass the value to their official SDKs, so it must be an endpoint host (for
-example, `sms.internal.example` or `127.0.0.1:8443`) without a URL scheme or
-path. UCloud, Qiniu Cloud, and Yunpian perform direct HTTP requests and require
-an absolute `http://` or `https://` URL; Qiniu and Yunpian custom endpoints
-must include the API path used for the send operation.
+Credentials and Provider settings are explicit constructor inputs. The library does not read environment variables or configuration files. Default clients retain Go standard proxy discovery; inject an `http.Client` for a different transport policy.
 
-Credentials and Provider business settings are explicit constructor inputs.
-The library does not load them from environment variables or configuration
-files. Default clients retain Go's standard `HTTP_PROXY`, `HTTPS_PROXY`, and
-`NO_PROXY` discovery; inject an `http.Client` to use a different transport
-policy.
+## Send Failure handling
 
-## Error handling
+Errors before Provider invocation are ordinary errors, including validation, an already-done Context, Provider-specific preflight rejection, encoding, and request construction failures. They do not satisfy `failure.From`.
 
-Failures after a request crosses the Provider seam are classified by the
-public `failure` package. Use `failure.From(err)` to distinguish them from
-ordinary errors, then inspect the returned `failure.Failure` with `Category()`,
-`Details()`, and `UnknownOutcome()`. The five categories are
-`authentication`, `rate_limited`, `rejected`, `unavailable`, and
-`unknown_outcome`.
+After invocation, explicit Provider decisions use `authentication`, `rate_limited`, `rejected`, or `unavailable`. Indeterminate results use `unknown_outcome`. Inspect a Send Failure with `failure.From(err)`, `Category()`, `Details()`, and `UnknownOutcome()`.
 
-Validation, an already-done Context, Provider-specific preflight rejection,
-request encoding, and request construction failures are ordinary errors; they
-do not satisfy `failure.From`. A Failure's `Error()` contains only its
-canonical Provider and category. `Details()` may expose validated Provider,
-Code, and RequestID values, but never Recipient, template parameter values,
-Provider messages, native errors, or request bodies.
+A Failure exposes only safe structured diagnostics. `Details()` may contain Provider, Code, and RequestID; it never exposes native error identity, Provider response text, Recipient, template values, or request bodies. When the category is `unknown_outcome`, do not assume the Provider rejected the request. Reconcile before retrying according to the application idempotency policy.
 
-An `unknown_outcome` means the caller must not assume the Provider did not
-accept the Send Attempt. Reconcile before retrying according to the
-application's idempotency policy.
+## Behavioral guarantees
+
+- Each Send Attempt targets exactly one explicitly selected Provider.
+- The library does not automatically retry, follow redirects, route, or fail over.
+- Provider instances are safe for concurrent use under the repository race tests.
+- Default HTTP clients use bounded timeouts and Go standard proxy discovery.
+- A `Submission` proves Provider acceptance, not final SMS delivery.
 
 ## Non-goals
 
-首版不包含：
+Version one does not include:
 
-- Provider 自动选择、路由策略或中央 Manager
-- 同一 Provider 自动重试、跨 Provider 降级或故障转移
-- 多收件人、批量或个性化批量发送
-- 原始文本短信
-- 逻辑模板或逻辑签名注册表
-- 送达回执查询、回调处理或最终送达保证
-- 异步队列、后台 worker、日志或指标
-- 自动读取环境变量或配置文件
-- Provider 专属的单次发送扩展选项
-- 成功响应中的官方 SDK 原始对象
+- automatic Provider selection, routing policies, or a central manager
+- automatic retry, cross-Provider fallback, or failover
+- multiple Recipients, bulk sending, or personalized bulk sending
+- raw text messages
+- logical template or signature registries
+- delivery receipt queries, callback handling, or final delivery guarantees
+- asynchronous queues, background workers, logging, or metrics
+- automatic environment-variable or configuration-file loading
+- Provider-specific per-send extension options
+- official SDK response objects in successful results
 
-See [Live Provider Verification](docs/integration-testing.md) for the
-credential-gated release checks.
+## Live Provider verification
+
+Live tests are credential-gated and excluded from normal CI. Verification has not yet been completed for all five Providers for this prerelease. See [Live Provider Verification](docs/integration-testing.md) for the approved test procedure and sensitive-data rules.
